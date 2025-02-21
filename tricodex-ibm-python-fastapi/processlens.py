@@ -356,6 +356,24 @@ class ProcessLens:
         # 1. Analyze dataset structure with function calling
         if thought_callback:
             thought = await get_model_thought("structure_analysis")
+            thought_callback("structure_analysis", thought)
+            
+        structure = await self.analyzer.analyze_structure_with_functions(df, [dataset_analysis_spec])
+        
+        # 2. Extract and analyze process patterns
+        if thought_callback:
+            thought = await get_model_thought("pattern_mining")
+            thought_callback("pattern_mining", thought)
+            
+        steps = await self.miner.extract_process_steps(df, structure)
+        patterns = await self.miner.identify_patterns(steps)
+        
+        # 3. Perform RAR-enhanced performance analysis
+        if thought_callback:
+            thought = await get_model_thought("performance_analysis")
+            thought_callback("performance_analysis", thought)
+            
+        performance = await self.optimizer.analyze_performance(patterns, df)
         
         # 4. Generate context-aware improvements
         if thought_callback:
