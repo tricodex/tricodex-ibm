@@ -1,5 +1,6 @@
 import os
 import pandas as pd
+import numpy as np  # Add numpy import
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -14,8 +15,9 @@ from bson import ObjectId
 import io
 import openpyxl
 import chardet
-import motor.motor_asyncio
 from db import Database
+import asyncio
+from ibm_watson_machine_learning.metanames import GenTextParamsMetaNames as GenParams
 
 # Load environment variables
 load_dotenv()
@@ -58,9 +60,7 @@ async def add_security_headers(request, call_next):
     return response
 
 # MongoDB configuration
-MONGODB_URL = os.getenv("MONGODB_URL", "mongodb+srv://your-cluster.mongodb.net")
-client = motor.motor_asyncio.AsyncIOMotorClient(MONGODB_URL)
-db = client.processlens_db
+db = None
 
 # Store background tasks results
 analysis_results = {} 
@@ -73,22 +73,13 @@ def get_process_lens():
     try:
         if (_process_lens is None):
             logger.info("Initializing ProcessLens...")
-            model_parameters = {
-                "decoding_method": "greedy",
-                "max_new_tokens": 1000,
-                "min_new_tokens": 1,
-                "temperature": 0.7,
-                "repetition_penalty": 1.1
-            }
             
+            # Initialize with minimal required params similar to test_watson.py
             model = WatsonxLLM(
                 model_id="ibm/granite-3-8b-instruct",
-                credentials={
-                    "url": os.getenv("WATSONX_URL"),
-                    "apikey": os.getenv("IBM_API_KEY")
-                },
+                apikey=os.getenv("IBM_API_KEY"),
                 project_id=os.getenv("PROJECT_ID"),
-                params=model_parameters
+                url=os.getenv("WATSONX_URL")
             )
             
             _process_lens = ProcessLens(model)
@@ -127,12 +118,26 @@ async def parse_document(file: UploadFile) -> pd.DataFrame:
         )
 
 class JSONEncoder(json.JSONEncoder):
-    """Custom JSON encoder for MongoDB ObjectId and datetime objects"""
+    """Custom JSON encoder for MongoDB ObjectId, datetime objects, and asyncio Futures"""
     def default(self, obj):
         if isinstance(obj, ObjectId):
             return str(obj)
         if isinstance(obj, datetime):
             return obj.isoformat()
+        if isinstance(obj, pd.Timestamp):  # Handle pandas Timestamp objects
+            return obj.isoformat()
+        if isinstance(obj, np.int64):  # Handle numpy integers
+            return int(obj)
+        if isinstance(obj, np.float64):  # Handle numpy floats
+            return float(obj)
+        if asyncio.isfuture(obj):
+            # Handle asyncio Future objects
+            try:
+                loop = asyncio.get_event_loop()
+                return loop.run_until_complete(obj)
+            except Exception as e:
+                logger.error(f"Error resolving Future: {e}")
+                return None
         return super().default(obj)
 
 # Background task for analysis
@@ -158,41 +163,44 @@ async def analyze_in_background(task_id: str, df: pd.DataFrame):
                 {
                     "$push": {
                         "thoughts": {
-                            "timestamp": datetime.utcnow(),
+                            "timestamp": datetime.utcnow().isoformat(),
                             "stage": stage,
                             "thought": f"{stage_info['prompt_prefix']}{thought}",
                             "progress": stage_info['progress']
                         }
                     },
-                    "$set": {
-                        "progress": stage_info['progress']
-                    }
+                    "$set": {"progress": stage_info['progress']}
                 }
             )
         
         # Run analysis with thought tracking
         results = await process_lens.analyze_dataset(df, thought_callback=thought_callback)
         
-        # Store final results in MongoDB
+        # Format results for MongoDB storage
+        serialized_results = {
+            "status": "completed",
+            "results": results,
+            "completed_at": datetime.utcnow().isoformat()
+        }
+        
+        # Update MongoDB with final results
         await db.analyses.update_one(
             {"_id": ObjectId(task_id)},
-            {
-                "$set": {
-                    "status": "completed",
-                    "results": results,
-                    "completed_at": datetime.utcnow()
-                }
-            }
+            {"$set": serialized_results}
         )
         
     except Exception as e:
-        logger.error(f"Error in background analysis: {str(e)}")
+        error_detail = str(e)
+        logger.error(f"Error in background analysis: {error_detail}")
+        
+        # Update MongoDB with error status
         await db.analyses.update_one(
             {"_id": ObjectId(task_id)},
             {
                 "$set": {
                     "status": "failed",
-                    "error": str(e)
+                    "error": error_detail,
+                    "completed_at": datetime.utcnow().isoformat()
                 }
             }
         )
@@ -216,6 +224,10 @@ async def analyze_dataset(
     Returns a task ID that can be used to check the analysis status
     """
     try:
+        global db
+        if db is None:
+            db = await Database.get_db()
+            
         # Check file size
         max_size = int(os.getenv("MAX_UPLOAD_SIZE", 10485760))  # 10MB default
         file_size = 0
@@ -241,24 +253,33 @@ async def analyze_dataset(
         task_id = str(ObjectId())
         project_info = {
             "name": project_name or file.filename,
-            "created_at": datetime.utcnow(),
+            "created_at": datetime.utcnow().isoformat(),  # Convert to ISO string
             "file_type": file.content_type,
             "columns": list(df.columns),
             "row_count": len(df)
         }
         
         # Store initial analysis info in MongoDB
-        await db.analyses.insert_one({
-            "_id": ObjectId(task_id),
-            "status": "processing",
-            "progress": 0,
-            "thoughts": [],
-            "project": project_info
-        })
+        try:
+            # Insert with await since we're using Motor
+            await db.analyses.insert_one({
+                "_id": ObjectId(task_id),
+                "status": "processing",
+                "progress": 0,
+                "thoughts": [],
+                "project": project_info
+            })
+        except Exception as e:
+            logger.error(f"MongoDB insertion error: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Database error: {str(e)}"
+            )
         
         # Start background analysis
         background_tasks.add_task(analyze_in_background, task_id, df)
         
+        # Convert project_info dates to ISO strings before returning
         return JSONResponse(
             content={
                 "message": "Analysis started",
@@ -268,6 +289,8 @@ async def analyze_dataset(
             status_code=202
         )
         
+    except HTTPException as he:
+        raise he
     except Exception as e:
         logger.error(f"Error processing file: {str(e)}")
         raise HTTPException(
@@ -278,20 +301,34 @@ async def analyze_dataset(
 @app.get("/status/{task_id}")
 async def get_analysis_status(task_id: str):
     """Get the status and results of an analysis task"""
-    analysis = await db.analyses.find_one({"_id": ObjectId(task_id)})
-    if not analysis:
-        raise HTTPException(
-            status_code=404,
-            detail="Analysis task not found"
+    try:
+        # Get analysis data from MongoDB
+        analysis = await db.analyses.find_one({"_id": ObjectId(task_id)})
+        if not analysis:
+            raise HTTPException(
+                status_code=404,
+                detail="Analysis task not found"
+            )
+
+        # Convert MongoDB document to dictionary and handle serialization
+        analysis_dict = dict(analysis)
+        
+        return JSONResponse(
+            content=json.loads(
+                json.dumps(analysis_dict, cls=JSONEncoder)
+            )
         )
-    
-    return JSONResponse(content=json.loads(json.dumps(analysis, cls=JSONEncoder)))
+    except Exception as e:
+        logger.error(f"Error retrieving analysis status: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error retrieving analysis status: {str(e)}"
+        )
 
 @app.get("/projects")
 async def list_projects(skip: int = 0, limit: int = 10):
     """List all analysis projects"""
-    cursor = db.analyses.find({}).sort("created_at", -1).skip(skip).limit(limit)
-    projects = await cursor.to_list(length=limit)
+    projects = list(db.analyses.find({}).sort("created_at", -1).skip(skip).limit(limit))
     return JSONResponse(content=json.loads(json.dumps(projects, cls=JSONEncoder)))
 
 @app.get("/health")
@@ -398,13 +435,22 @@ async def analyze_resources(
 # Startup and shutdown events
 @app.on_event("startup")
 async def startup_db_client():
-    await Database.connect_db()
-    logger.info("ProcessLens API started, database connected")
+    global db
+    try:
+        db = await Database.connect_db()
+        logger.info("ProcessLens API started, database connected")
+    except Exception as e:
+        logger.error(f"Failed to connect to database: {e}")
+        raise
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
-    await Database.close_db()
-    logger.info("ProcessLens API shutdown, database disconnected")
+    try:
+        await Database.close_db()
+        logger.info("ProcessLens API shutdown, database disconnected")
+    except Exception as e:
+        logger.error(f"Error during database shutdown: {e}")
+        raise
 
 # Add storage cleanup task
 @app.post("/admin/cleanup")

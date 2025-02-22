@@ -1,69 +1,105 @@
 """
 Database utilities for ProcessLens
 """
-from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import MongoClient
+from pymongo.server_api import ServerApi
 from typing import Optional
+from pymongo.errors import PyMongoError, ConnectionFailure
 import logging
 import os
 from datetime import datetime, timedelta
-import ssl
+import certifi
+from motor.motor_asyncio import AsyncIOMotorClient
 
 logger = logging.getLogger(__name__)
 
 class Database:
     client: Optional[AsyncIOMotorClient] = None
+    db = None  # Store database instance
     
     @classmethod
     async def connect_db(cls):
         """Connect to MongoDB"""
         try:
-            # Configure SSL context
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-            
-            # Create MongoDB client with SSL configuration
+            # Create MongoDB client with modern configuration
             cls.client = AsyncIOMotorClient(
                 os.getenv("MONGODB_URL"),
+                server_api=ServerApi('1'),
                 tls=True,
-                tlsAllowInvalidCertificates=True,  # Only for development, remove in production
-                ssl_cert_reqs=ssl.CERT_NONE  # Only for development, use proper cert validation in production
+                tlsCAFile=certifi.where()
             )
-            logger.info("Connected to MongoDB")
             
-            # Create indexes for better query performance
-            db = cls.client.processlens_db
-            await db.analyses.create_index([("created_at", -1)])
-            await db.analyses.create_index([("status", 1)])
-            await db.analyses.create_index([("project.name", 1)])
+            # Test connection with ping
+            try:
+                await cls.client.admin.command('ping')
+                logger.info("Connected to MongoDB")
+            except ConnectionFailure as cf:
+                logger.error(f"Failed to ping MongoDB server: {cf}")
+                raise
+            
+            # Initialize database instance
+            cls.db = cls.client.processlens_db
+            
+            # Create indexes with error handling
+            try:
+                await cls.db.analyses.create_index([("created_at", -1)])
+                await cls.db.analyses.create_index([("status", 1)])
+                await cls.db.analyses.create_index([("project.name", 1)])
+            except PyMongoError as e:
+                logger.warning(f"Error creating indexes: {e}")
+                # Continue even if index creation fails as they're not critical
+            
+            return cls.db
             
         except Exception as e:
             logger.error(f"Could not connect to MongoDB: {e}")
-            raise e
+            raise
     
     @classmethod
     async def close_db(cls):
         """Close MongoDB connection"""
         if cls.client:
-            cls.client.close()
-            logger.info("Closed MongoDB connection")
+            try:
+                cls.client.close()
+                cls.db = None
+                logger.info("Closed MongoDB connection")
+            except PyMongoError as e:
+                logger.error(f"Error closing MongoDB connection: {e}")
+                raise
+    
+    @classmethod
+    async def get_db(cls):
+        """Get database instance, connecting if necessary"""
+        if cls.db is None:
+            await cls.connect_db()
+        return cls.db
     
     @classmethod
     async def cleanup_old_analyses(cls, days: int = 30):
         """Clean up old analyses to manage storage"""
-        if not cls.client:
+        if not cls.db:
             logger.error("Database not connected")
             return
             
         try:
-            db = cls.client.processlens_db
             cutoff_date = datetime.utcnow() - timedelta(days=days)
             
-            result = await db.analyses.delete_many({
+            result = await cls.db.analyses.delete_many({
                 "created_at": {"$lt": cutoff_date},
                 "status": {"$in": ["completed", "failed"]}
             })
-            logger.info(f"Cleaned up {result.deleted_count} old analyses")
+            
+            if result:
+                deleted_count = result.deleted_count
+                logger.info(f"Cleaned up {deleted_count} old analyses")
+                return {"deleted_count": deleted_count}
+            else:
+                logger.warning("Cleanup operation returned no result")
+                return {"deleted_count": 0}
+                
+        except PyMongoError as e:
+            logger.error(f"MongoDB error during cleanup: {e}")
+            raise
         except Exception as e:
             logger.error(f"Error cleaning up old analyses: {e}")
-            raise e
+            raise

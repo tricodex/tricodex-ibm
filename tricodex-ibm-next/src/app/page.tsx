@@ -35,6 +35,8 @@ import { AnalysisPDF } from "@/components/process/analysis-pdf"
 import { pdf } from '@react-pdf/renderer'
 import { saveAs } from 'file-saver'
 import { startAnalysis, checkAnalysisStatus } from "@/lib/api"
+import { toast } from 'sonner'
+import { Toaster } from 'sonner'
 
 // Define types for our data structures
 type ThoughtMessage = {
@@ -74,17 +76,27 @@ export default function ProcessLensPage() {
     formData.append("project_name", "Process Analysis " + new Date().toLocaleDateString())
 
     try {
-      const data = await startAnalysis(formData)
-      setAnalysisResult({
-        task_id: data.task_id,
-        status: "processing",
-        progress: 0,
-        thoughts: []
+      toast.promise(startAnalysis(formData), {
+        loading: 'Starting analysis...',
+        success: (data) => {
+          setAnalysisResult({
+            task_id: data.task_id,
+            status: "processing",
+            progress: 0,
+            thoughts: []
+          })
+          setIsPolling(true)
+          setActiveSection("analysis")
+          return 'Analysis started successfully'
+        },
+        error: (err) => {
+          console.error("Upload error:", err)
+          return 'Failed to start analysis'
+        }
       })
-      setIsPolling(true)
-      setActiveSection("analysis")
     } catch (error) {
       console.error("Upload error:", error)
+      toast.error('Failed to upload file')
     }
   }
 
@@ -116,15 +128,24 @@ export default function ProcessLensPage() {
     if (!analysisResult) return
     
     try {
-      const blob = await pdf(<AnalysisPDF data={analysisResult} />).toBlob()
-      saveAs(blob, `process-analysis-${new Date().toISOString()}.pdf`)
+      toast.promise(
+        pdf(<AnalysisPDF data={analysisResult} />).toBlob().then(blob => {
+          saveAs(blob, `process-analysis-${new Date().toISOString()}.pdf`)
+        }), {
+          loading: 'Generating PDF...',
+          success: 'PDF downloaded successfully',
+          error: 'Failed to generate PDF'
+        }
+      )
     } catch (error) {
       console.error("PDF generation error:", error)
+      toast.error('Failed to generate PDF')
     }
   }
 
   return (
     <SidebarProvider>
+      <Toaster />
       <AppSidebar />
       <SidebarInset>
         <header className="flex h-16 shrink-0 items-center gap-2 border-b">

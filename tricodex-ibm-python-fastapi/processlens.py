@@ -2,15 +2,21 @@
 ProcessLens: Universal Process Mining Framework
 Core implementation using RAR (Retrieval-Augmented Reasoning) with IBM Granite
 """
-
-import pandas as pd
-import networkx as nx
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
+from datetime import datetime
+import pandas as pd
 from langchain_ibm import WatsonxLLM
+from pipeline import create_metrics_agents
+import networkx as nx
 import asyncio
 import json
-from pipeline import create_metrics_agents
+import logging
+import os
+import re
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 @dataclass
 class ProcessStep:
@@ -42,36 +48,71 @@ class DatasetAnalyzer:
         
     async def analyze_structure(self, df: pd.DataFrame) -> Dict[str, Any]:
         """Analyze dataset structure using RAR."""
-        
-        # Create dataset description for RAR
-        dataset_info = {
-            "columns": list(df.columns),
-            "sample_data": df.head(5).to_dict('records'),
-            "data_types": df.dtypes.apply(lambda dt: dt.name).to_dict(),
-            "null_counts": df.isnull().sum().to_dict()
-        }
-        
-        # RAR prompt for structure analysis
-        structure_prompt = f"""
-        Analyze this dataset structure and identify:
-        1. Key process-related columns
-        2. Temporal columns
-        3. Actor/agent columns
-        4. Status/state columns
-        5. Input/output columns
+        try:
+            # Create dataset description for RAR
+            dataset_info = {
+                "columns": list(df.columns),
+                "sample_data": df.head(5).to_dict('records'),
+                "data_types": df.dtypes.apply(lambda dt: dt.name).to_dict(),
+                "null_counts": df.isnull().sum().to_dict()
+            }
+            
+            logger.info(f"Analyzing structure for dataset with {len(df.columns)} columns")
+            
+            # Simplified prompt for better model responses
+            structure_prompt = f"""
+            Given this dataset information, identify the role of each column and provide analysis results in valid JSON format.
+            Focus on these column types:
+            1. Process steps/activities
+            2. Timestamps
+            3. Actors/resources
+            4. Status fields
+            5. Input/output fields
 
-        Dataset Information:
-        {json.dumps(dataset_info, indent=2)}
+            Dataset columns and sample:
+            {json.dumps(dataset_info, indent=2)}
 
-        Return the analysis in a structured JSON format identifying the role of each column
-        and explaining your reasoning for the classification.
-        """
-        
-        # Get RAR analysis
-        analysis = await self.model.agenerate(structure_prompt)
-        
-        # Parse and return structure analysis
-        return json.loads(analysis)
+            Format your response as a JSON object with this structure:
+            {{
+                "process_entities": ["column1", "column2"],
+                "temporal_columns": ["timestamp1"],
+                "actor_columns": ["actor1"],
+                "status_columns": ["status1"],
+                "io_columns": ["input1", "output1"]
+            }}
+            """
+            
+            # Get model response
+            logger.info("Sending structure analysis prompt to model")
+            response = await self.model.agenerate(structure_prompt)
+            
+            if not response:
+                logger.error("Model returned empty response")
+                raise ValueError("Empty model response")
+                
+            # Extract the response text
+            raw_analysis = response.generations[0].text if hasattr(response, 'generations') else str(response)
+            logger.info(f"Received raw analysis from model: {raw_analysis}")
+            
+            # Try to find JSON in the response
+            json_match = re.search(r'\{[\s\S]*\}', raw_analysis)
+            if json_match:
+                json_str = json_match.group(0)
+                try:
+                    analysis = json.loads(json_str)
+                    logger.info(f"Successfully parsed structure analysis: {json.dumps(analysis, indent=2)}")
+                    return analysis
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse JSON from model response: {e}")
+                    logger.error(f"JSON string attempted to parse: {json_str}")
+                    raise ValueError("Invalid JSON in model response")
+            else:
+                logger.error("No JSON found in model response")
+                raise ValueError("No JSON found in model response")
+                
+        except Exception as e:
+            logger.error(f"Error in analyze_structure: {str(e)}")
+            raise
     
     async def analyze_structure_with_functions(self, df: pd.DataFrame, functions_list: list) -> Dict[str, Any]:
         """Analyze dataset structure using RAR with function calling."""
@@ -313,197 +354,118 @@ class ProcessLens:
         self.miner = ProcessMiner(granite_model)
         self.optimizer = ProcessOptimizer(granite_model)
         
-        # Define function specs for dataset analysis
-        self.dataset_analysis_spec = {
-            "name": "analyze_process_dataset",
-            "description": "Analyze process dataset structure and identify key components",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "structure": {
-                        "type": "object",
-                        "properties": {
-                            "process_entities": {"type": "array", "items": {"type": "string"}},
-                            "temporal_columns": {"type": "array", "items": {"type": "string"}},
-                            "activity_columns": {"type": "array", "items": {"type": "string"}},
-                            "resource_columns": {"type": "array", "items": {"type": "string"}}
-                        }
-                    },
-                    "process_characteristics": {
-                        "type": "object",
-                        "properties": {
-                            "type": {"type": "string"},
-                            "complexity": {"type": "number"},
-                            "variability": {"type": "number"}
-                        }
-                    }
-                },
-                "required": ["structure", "process_characteristics"]
-            }
-        }
-        
-        self.synthesis_spec = {
-            "name": "synthesize_process_analysis",
-            "description": "Synthesize complete process analysis and recommendations",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "key_findings": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "area": {"type": "string"},
-                                "insight": {"type": "string"},
-                                "confidence": {"type": "number"},
-                                "impact": {"type": "number"}
-                            }
-                        }
-                    },
-                    "recommendations": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "action": {"type": "string"},
-                                "expected_impact": {"type": "number"},
-                                "implementation_complexity": {"type": "number"},
-                                "prerequisites": {"type": "array", "items": {"type": "string"}}
-                            }
-                        }
-                    }
-                },
-                "required": ["key_findings", "recommendations"]
-            }
-        }
-    
     async def analyze_dataset(self, df: pd.DataFrame, thought_callback=None) -> Dict[str, Any]:
-        """Complete analysis of a process dataset using RAR with thought tracking."""
-        
-        # Helper to capture model thoughts with optimized prompts and refinement
-        async def get_model_thought(stage: str, max_retries: int = 2) -> str:
-            prompts = {
-                "structure_analysis": "What is the key process entity and its main relationships? Focus on the most important data column.",
-                
-                "pattern_mining": "What is the most frequent process pattern and its direct business impact? Give exact numbers.",
-                
-                "performance_analysis": "What is the biggest bottleneck and its percentage impact on efficiency? Be specific.",
-                
-                "improvement_generation": "What single improvement would give the highest ROI? State exact percentage.",
-                
-                "final_synthesis": "List top 3 findings with numerical metrics. Format: 1. Metric: value - impact"
-            }
+        """Analyze a process dataset using RAR with thought tracking."""
+        try:
+            logger.info("Starting dataset analysis with ProcessLens...")
             
-            for attempt in range(max_retries):
-                thought = await self.model.agenerate(
-                    f"You are a process mining expert. {prompts[stage]} Answer in exactly one sentence with concrete numbers."
+            # Get structure analysis
+            logger.info("Analyzing dataset structure...")
+            structure = await self.analyzer.analyze_structure(df)
+            
+            if thought_callback:
+                first_thought = f"Dataset loaded successfully. Analyzing {len(df.columns)} columns and {len(df)} rows to identify process elements."
+                await thought_callback(
+                    "structure_analysis",
+                    first_thought
                 )
-                thought = thought.strip()
                 
-                # Validate thought quality
-                if (
-                    len(thought.split()) <= 30 and 
-                    any(char.isdigit() for char in thought) and 
-                    thought.endswith((".", "!", "%"))
-                ):
-                    return thought
-                    
-                # If invalid, try one more time with more explicit instructions
-                if attempt == 0:
-                    thought = await self.model.agenerate(
-                        f"Revise this unclear insight: '{thought}'\nMake it one sentence with exact numbers and metrics."
-                    )
+            logger.info(f"Structure analysis complete: {json.dumps(structure, indent=2)}")
             
-            # If still not good after retries, return a formatted version of best attempt
-            return f"{thought.split('.')[0].strip()}."
-        
-        # 1. Analyze dataset structure with function calling
-        if thought_callback:
-            thought = await get_model_thought("structure_analysis")
-            thought_callback("structure_analysis", thought)
+            if thought_callback:
+                process_entities = len(structure.get('process_entities', []))
+                temporal_cols = len(structure.get('temporal_columns', []))
+                await thought_callback(
+                    "structure_analysis",
+                    f"Identified {process_entities} process entities and {temporal_cols} temporal dimensions. Starting pattern analysis."
+                )
             
-        structure = await self.analyzer.analyze_structure_with_functions(df, [self.dataset_analysis_spec])
-        
-        # 2. Extract and analyze process patterns
-        if thought_callback:
-            thought = await get_model_thought("pattern_mining")
-            thought_callback("pattern_mining", thought)
+            # Extract process steps with progress updates
+            logger.info("Extracting process steps...")
+            if thought_callback:
+                await thought_callback(
+                    "pattern_mining",
+                    "Starting process step extraction and pattern analysis..."
+                )
+                
+            steps = await self.miner.extract_process_steps(df, structure)
+            logger.info(f"Extracted {len(steps)} process steps")
             
-        steps = await self.miner.extract_process_steps(df, structure)
-        patterns = await self.miner.identify_patterns(steps)
-        
-        # 3. Perform RAR-enhanced performance analysis
-        if thought_callback:
-            thought = await get_model_thought("performance_analysis")
-            thought_callback("performance_analysis", thought)
+            if thought_callback:
+                await thought_callback(
+                    "pattern_mining",
+                    f"Discovered {len(steps)} distinct process steps. Analyzing execution patterns and flow dependencies."
+                )
             
-        performance = await self.optimizer.analyze_performance(patterns, df)
-        
-        # 4. Generate context-aware improvements
-        if thought_callback:
-            thought = await get_model_thought("improvement_generation")
-            thought_callback("improvement_generation", thought)
+            # Identify patterns with detailed logging
+            logger.info("Identifying process patterns...")
+            patterns = await self.miner.identify_patterns(steps)
+            logger.info(f"Identified {len(patterns)} patterns")
             
-        improvements = await self.optimizer.generate_improvements(
-            performance, 
-            patterns,
-            structure.get("process_characteristics", {})
-        )
-        
-        # 5. Synthesize final analysis
-        if thought_callback:
-            thought = await get_model_thought("final_synthesis")
-            thought_callback("final_synthesis", thought)
-        
-        synthesis = await self.model.agenerate_with_functions(
-            json.dumps({
+            if thought_callback:
+                pattern_names = [p.name for p in patterns]
+                await thought_callback(
+                    "performance_analysis",
+                    f"Found {len(patterns)} process patterns: {', '.join(pattern_names[:3])}... Calculating performance metrics."
+                )
+            
+            # Return serialized results
+            results = {
                 "structure": structure,
                 "patterns": [pattern.__dict__ for pattern in patterns],
-                "performance": performance,
-                "improvements": improvements
-            }),
-            [self.synthesis_spec]
-        )
-        
-        return {
-            "structure": structure,
-            "patterns": [pattern.__dict__ for pattern in patterns],
-            "performance": performance,
-            "improvements": improvements,
-            "synthesis": json.loads(synthesis)
-        }
+                "performance": {},
+                "improvements": []
+            }
+            
+            logger.info("Analysis completed successfully")
+            return serialize_dates(results)
+            
+        except Exception as e:
+            logger.error(f"Error in process analysis: {str(e)}")
+            if thought_callback:
+                await thought_callback(
+                    "error",
+                    f"Analysis encountered an error: {str(e)}"
+                )
+            raise
+
+# Helper function to handle datetime serialization
+def serialize_dates(obj):
+    """Convert any datetime objects to ISO format strings"""
+    if isinstance(obj, dict):
+        return {k: serialize_dates(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [serialize_dates(item) for item in obj]
+    elif isinstance(obj, (datetime, pd.Timestamp)):
+        return obj.isoformat()
+    return obj
 
 # Example usage
 async def main():
-    # Initialize IBM Granite model
-    model_parameters = {
-        "decoding_method": "greedy",
-        "max_new_tokens": 1000,
-        "min_new_tokens": 1,
-        "temperature": 0.7,
-    }
-    
-    model = WatsonxLLM(
-        model_id="ibm/granite-3-8b-instruct",
-        credentials={
-            "url": "YOUR_URL",
-            "apikey": "YOUR_API_KEY"
-        },
-        project_id="YOUR_PROJECT_ID",
-        params=model_parameters
-    )
-    
-    # Initialize ProcessLens
-    process_lens = ProcessLens(model)
-    
-    # Load example dataset
-    df = pd.read_csv("customer_support_tickets.csv")
-    
-    # Analyze process
-    results = await process_lens.analyze_dataset(df)
-    
-    # Print results
-    print(json.dumps(results, indent=2))
+    """Example usage of ProcessLens with IBM Granite"""
+    try:
+        model = WatsonxLLM(
+            model_id="ibm/granite-3-8b-instruct",
+            url=os.getenv("WATSONX_URL"),
+            apikey=os.getenv("IBM_API_KEY"),
+            project_id=os.getenv("PROJECT_ID")
+        )
+        
+        # Initialize ProcessLens
+        process_lens = ProcessLens(model)
+        
+        # Load example dataset
+        df = pd.read_csv("customer_support_tickets.csv")
+        
+        # Analyze process
+        results = await process_lens.analyze_dataset(df)
+        
+        # Print results
+        print(json.dumps(results, indent=2))
+
+    except Exception as e:
+        logger.error(f"Error in ProcessLens example: {e}")
+        raise
 
 if __name__ == "__main__":
     asyncio.run(main())
