@@ -1,23 +1,36 @@
-import os
-import pandas as pd
-import numpy as np  # Add numpy import
-from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
+"""
+ProcessLens FastAPI Server with GridFS integration and WebSocket support
+"""
+from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from bson import ObjectId
+from datetime import datetime
+import os
+import io
+import json
+from json import JSONEncoder
+import logging
+import pandas as pd
+import asyncio
+from typing import Optional, Dict, Any, List
 from dotenv import load_dotenv
 from langchain_ibm import WatsonxLLM
-from processlens import ProcessLens
-import logging
-from typing import Optional, Dict, Any, List
-import json
-from datetime import datetime
-from bson import ObjectId
-import io
-import openpyxl
-import chardet
-from db import Database
-import asyncio
 from ibm_watson_machine_learning.metanames import GenTextParamsMetaNames as GenParams
+from storage import GridFSStorage
+from processlens import ProcessLens
+from db import Database
+import threading
+from contextlib import asynccontextmanager
+
+# Custom JSON encoder for ObjectId
+class CustomJSONEncoder(JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, ObjectId):
+            return str(obj)
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        return super().default(obj)
 
 # Load environment variables
 load_dotenv()
@@ -29,20 +42,107 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Global ProcessLens instance
-_process_lens: Optional[ProcessLens] = None
+# Define lifespan before app initialization
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    GlobalState._db = await Database.connect_db()
+    GlobalState._storage = GridFSStorage(GlobalState._db)
+    try:
+        yield
+    finally:
+        # Shutdown
+        await Database.close_db()
+        GlobalState._process_lens = None
+        GlobalState._storage = None
 
-# Initialize FastAPI app
+# Global instances
+class GlobalState:
+    _process_lens: Optional[ProcessLens] = None
+    _db = None
+    _storage = None
+    _lock = threading.Lock()
+
+    @classmethod
+    def get_process_lens(cls):
+        if cls._process_lens is None:
+            with cls._lock:
+                if cls._process_lens is None:  # Double-check pattern
+                    try:
+                        model = WatsonxLLM(
+                            model_id="ibm/granite-3-8b-instruct",
+                            apikey=os.getenv("IBM_API_KEY"),
+                            project_id=os.getenv("PROJECT_ID"),
+                            url=os.getenv("WATSONX_URL")
+                        )
+                        cls._process_lens = ProcessLens(model)
+                    except Exception as e:
+                        logger.error(f"Failed to initialize ProcessLens: {e}")
+                        raise
+        return cls._process_lens
+
+    @classmethod
+    async def get_storage(cls):
+        """Get or initialize GridFS storage"""
+        if cls._storage is None:
+            cls._storage = GridFSStorage(cls._db)
+        return cls._storage
+
+# WebSocket connection manager
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: Dict[str, List[WebSocket]] = {}
+        self._lock = asyncio.Lock()
+        
+    async def connect(self, websocket: WebSocket, task_id: str):
+        await websocket.accept()
+        async with self._lock:
+            if task_id not in self.active_connections:
+                self.active_connections[task_id] = []
+            self.active_connections[task_id].append(websocket)
+            logger.info(f"New WebSocket connection for task {task_id}")
+        
+    async def disconnect(self, websocket: WebSocket, task_id: str):
+        async with self._lock:
+            if task_id in self.active_connections:
+                try:
+                    self.active_connections[task_id].remove(websocket)
+                    if not self.active_connections[task_id]:
+                        del self.active_connections[task_id]
+                    logger.info(f"WebSocket disconnected for task {task_id}")
+                except ValueError:
+                    pass
+                
+    async def broadcast_update(self, task_id: str, data: Dict[str, Any]):
+        async with self._lock:
+            if task_id in self.active_connections:
+                dead_ws = []
+                for websocket in self.active_connections[task_id]:
+                    try:
+                        await websocket.send_json(data)
+                    except Exception as e:
+                        logger.error(f"Error sending WebSocket message: {e}")
+                        dead_ws.append(websocket)
+                
+                # Cleanup dead connections
+                for ws in dead_ws:
+                    await self.disconnect(ws, task_id)
+
+# Initialize FastAPI with lifespan
 app = FastAPI(
     title="ProcessLens API",
     description="API for process mining and optimization using IBM Granite",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
-# Add CORS middleware for Nextjs frontend
+# Initialize connection manager
+manager = ConnectionManager()
+
+# Add CORS middleware after app initialization
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # Add your Next.js frontend URL
+    allow_origins=["http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -59,152 +159,6 @@ async def add_security_headers(request, call_next):
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
 
-# MongoDB configuration
-db = None
-
-# Store background tasks results
-analysis_results = {} 
-
-# Helper function to initialize WatsonxLLM and ProcessLens
-def get_process_lens():
-    """Get or initialize ProcessLens instance with proper error handling"""
-    global _process_lens
-    
-    try:
-        if (_process_lens is None):
-            logger.info("Initializing ProcessLens...")
-            
-            # Initialize with minimal required params similar to test_watson.py
-            model = WatsonxLLM(
-                model_id="ibm/granite-3-8b-instruct",
-                apikey=os.getenv("IBM_API_KEY"),
-                project_id=os.getenv("PROJECT_ID"),
-                url=os.getenv("WATSONX_URL")
-            )
-            
-            _process_lens = ProcessLens(model)
-            logger.info("ProcessLens initialized successfully")
-            
-        return _process_lens
-    except Exception as e:
-        logger.error(f"Error initializing ProcessLens: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail={"error": "Error initializing ProcessLens", "details": str(e)}
-        )
-
-async def parse_document(file: UploadFile) -> pd.DataFrame:
-    """Parse different document formats into a pandas DataFrame"""
-    contents = await file.read()
-    
-    if file.content_type == "text/csv":
-        # Detect encoding
-        encoding = chardet.detect(contents)['encoding']
-        return pd.read_csv(io.StringIO(contents.decode(encoding)))
-    
-    elif file.content_type in ["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/vnd.ms-excel"]:
-        return pd.read_excel(io.BytesIO(contents))
-    
-    elif file.content_type == "application/json":
-        return pd.DataFrame(json.loads(contents.decode('utf-8')))
-    
-    elif file.content_type == "text/xml":
-        return pd.read_xml(io.StringIO(contents.decode('utf-8')))
-    
-    else:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported file type: {file.content_type}. Supported types: CSV, Excel, JSON, XML"
-        )
-
-class JSONEncoder(json.JSONEncoder):
-    """Custom JSON encoder for MongoDB ObjectId, datetime objects, and asyncio Futures"""
-    def default(self, obj):
-        if isinstance(obj, ObjectId):
-            return str(obj)
-        if isinstance(obj, datetime):
-            return obj.isoformat()
-        if isinstance(obj, pd.Timestamp):  # Handle pandas Timestamp objects
-            return obj.isoformat()
-        if isinstance(obj, np.int64):  # Handle numpy integers
-            return int(obj)
-        if isinstance(obj, np.float64):  # Handle numpy floats
-            return float(obj)
-        if asyncio.isfuture(obj):
-            # Handle asyncio Future objects
-            try:
-                loop = asyncio.get_event_loop()
-                return loop.run_until_complete(obj)
-            except Exception as e:
-                logger.error(f"Error resolving Future: {e}")
-                return None
-        return super().default(obj)
-
-# Background task for analysis
-async def analyze_in_background(task_id: str, df: pd.DataFrame):
-    """Background task that handles process analysis and captures model thoughts"""
-    try:
-        process_lens = get_process_lens()
-        
-        async def thought_callback(stage: str, thought: str):
-            stages_info = {
-                "structure_analysis": {"progress": 20, "prompt_prefix": "Dataset Structure 📊: "},
-                "pattern_mining": {"progress": 40, "prompt_prefix": "Process Pattern 🔄: "},
-                "performance_analysis": {"progress": 60, "prompt_prefix": "Performance Metric ⚡: "},
-                "improvement_generation": {"progress": 80, "prompt_prefix": "Improvement 📈: "},
-                "final_synthesis": {"progress": 100, "prompt_prefix": "Key Insights 💡: "}
-            }
-            
-            stage_info = stages_info.get(stage, {"progress": 0, "prompt_prefix": ""})
-            
-            # Update MongoDB with new thought
-            await db.analyses.update_one(
-                {"_id": ObjectId(task_id)},
-                {
-                    "$push": {
-                        "thoughts": {
-                            "timestamp": datetime.utcnow().isoformat(),
-                            "stage": stage,
-                            "thought": f"{stage_info['prompt_prefix']}{thought}",
-                            "progress": stage_info['progress']
-                        }
-                    },
-                    "$set": {"progress": stage_info['progress']}
-                }
-            )
-        
-        # Run analysis with thought tracking
-        results = await process_lens.analyze_dataset(df, thought_callback=thought_callback)
-        
-        # Format results for MongoDB storage
-        serialized_results = {
-            "status": "completed",
-            "results": results,
-            "completed_at": datetime.utcnow().isoformat()
-        }
-        
-        # Update MongoDB with final results
-        await db.analyses.update_one(
-            {"_id": ObjectId(task_id)},
-            {"$set": serialized_results}
-        )
-        
-    except Exception as e:
-        error_detail = str(e)
-        logger.error(f"Error in background analysis: {error_detail}")
-        
-        # Update MongoDB with error status
-        await db.analyses.update_one(
-            {"_id": ObjectId(task_id)},
-            {
-                "$set": {
-                    "status": "failed",
-                    "error": error_detail,
-                    "completed_at": datetime.utcnow().isoformat()
-                }
-            }
-        )
-
 @app.get("/")
 async def root():
     """Health check endpoint"""
@@ -220,66 +174,51 @@ async def analyze_dataset(
     project_name: str = None
 ):
     """
-    Analyze a process dataset from various document formats
-    Returns a task ID that can be used to check the analysis status
+    Upload and analyze a process dataset
+    Returns a task ID for status tracking
     """
     try:
-        global db
-        if db is None:
-            db = await Database.get_db()
-            
-        # Check file size
-        max_size = int(os.getenv("MAX_UPLOAD_SIZE", 10485760))  # 10MB default
-        file_size = 0
-        contents = b""
+        # Get file content
+        contents = await file.read()
         
-        # Read file in chunks to check size
-        while chunk := await file.read(8192):
-            contents += chunk
-            file_size += len(chunk)
-            if file_size > max_size:
-                raise HTTPException(
-                    status_code=413,
-                    detail=f"File too large. Maximum size is {max_size/1048576:.1f}MB"
-                )
+        # Prepare metadata
+        metadata = {
+            "content_type": file.content_type,
+            "project_name": project_name,
+            "original_filename": file.filename,
+            "upload_date": datetime.utcnow().isoformat()
+        }
         
-        # Reset file pointer
-        file.file = io.BytesIO(contents)
+        # Save to GridFS
+        storage = await GlobalState.get_storage()
+        file_id = await storage.save_file(contents, file.filename, metadata)
         
-        # Parse the uploaded file into DataFrame
-        df = await parse_document(file)
-        
-        # Generate task ID and project info
+        # Create task ID and project info
         task_id = str(ObjectId())
         project_info = {
             "name": project_name or file.filename,
-            "created_at": datetime.utcnow().isoformat(),  # Convert to ISO string
+            "created_at": datetime.utcnow().isoformat(),
             "file_type": file.content_type,
-            "columns": list(df.columns),
-            "row_count": len(df)
+            "file_id": str(file_id)
         }
         
-        # Store initial analysis info in MongoDB
-        try:
-            # Insert with await since we're using Motor
-            await db.analyses.insert_one({
-                "_id": ObjectId(task_id),
-                "status": "processing",
-                "progress": 0,
-                "thoughts": [],
-                "project": project_info
-            })
-        except Exception as e:
-            logger.error(f"MongoDB insertion error: {e}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Database error: {str(e)}"
-            )
+        # Store initial analysis info
+        await GlobalState._db.analyses.insert_one({
+            "_id": ObjectId(task_id),
+            "status": "processing",
+            "progress": 0,
+            "thoughts": [],
+            "project": project_info,
+            "file_id": file_id
+        })
         
         # Start background analysis
-        background_tasks.add_task(analyze_in_background, task_id, df)
+        background_tasks.add_task(
+            analyze_in_background,
+            task_id=task_id,
+            file_id=file_id
+        )
         
-        # Convert project_info dates to ISO strings before returning
         return JSONResponse(
             content={
                 "message": "Analysis started",
@@ -289,8 +228,6 @@ async def analyze_dataset(
             status_code=202
         )
         
-    except HTTPException as he:
-        raise he
     except Exception as e:
         logger.error(f"Error processing file: {str(e)}")
         raise HTTPException(
@@ -298,25 +235,191 @@ async def analyze_dataset(
             detail=f"Error processing file: {str(e)}"
         )
 
+@app.websocket("/ws/{task_id}")
+async def websocket_endpoint(websocket: WebSocket, task_id: str):
+    """WebSocket endpoint for real-time analysis updates"""
+    try:
+        # Accept connection first
+        await websocket.accept()
+        logger.info(f"WebSocket connection established for task {task_id}")
+        
+        # Then add to manager
+        await manager.connect(websocket, task_id)
+        
+        # Send initial state
+        analysis = await GlobalState._db.analyses.find_one({"_id": ObjectId(task_id)})
+        if analysis:
+            if analysis.get('thoughts'):
+                for thought in analysis.get('thoughts', []):
+                    await websocket.send_json({
+                        'type': 'thought_update',
+                        'data': thought
+                    })
+            
+            if analysis.get('status') == 'completed':
+                await websocket.send_json({
+                    'type': 'analysis_complete',
+                    'data': {
+                        'results': analysis.get('results'),
+                        'completed_at': analysis.get('completed_at')
+                    }
+                })
+            elif analysis.get('status') == 'failed':
+                await websocket.send_json({
+                    'type': 'analysis_error',
+                    'data': {'error': analysis.get('error')}
+                })
+        
+        # Keep connection alive until client disconnects
+        while True:
+            try:
+                data = await websocket.receive_text()
+                msg = json.loads(data)
+                if msg.get('type') == 'ping':
+                    await websocket.send_json({'type': 'pong'})
+            except WebSocketDisconnect:
+                logger.info(f"WebSocket client disconnected: {task_id}")
+                break
+            except Exception as e:
+                logger.error(f"Error handling WebSocket message: {e}")
+                break
+                
+    except WebSocketDisconnect:
+        logger.info(f"WebSocket client disconnected during handshake: {task_id}")
+    except Exception as e:
+        logger.error(f"WebSocket connection error: {str(e)}")
+    finally:
+        await manager.disconnect(websocket, task_id)
+
+async def analyze_in_background(task_id: str, file_id: ObjectId):
+    try:
+        # Get file from GridFS and convert to DataFrame 
+        storage = await GlobalState.get_storage()
+        df = await storage.get_dataframe(file_id)
+        
+        # Initialize WatsonX LLM with correct credential format
+        model_params = {
+            "decoding_method": "greedy",
+            "max_new_tokens": 1024,
+            "min_new_tokens": 1,
+            "repetition_penalty": 1.2,
+            "temperature": 0.7
+        }
+        
+        # Changed: Pass credentials directly instead of nested dict
+        granite_model = WatsonxLLM(
+            model_id="ibm/granite-3-8b-instruct",
+            apikey=os.getenv("IBM_API_KEY"),  # Direct parameter
+            url=os.getenv("WATSONX_URL"),     # Direct parameter
+            project_id=os.getenv("PROJECT_ID"),
+            params=model_params
+        )
+        
+        process_lens = ProcessLens(granite_model)
+        
+        async def thought_callback(stage: str, thought: str):
+            stages_info = {
+                "structure_analysis": {"progress": 20, "prefix": "📊"},
+                "pattern_mining": {"progress": 40, "prefix": "🔄"},
+                "performance_analysis": {"progress": 60, "prefix": "⚡"},
+                "improvement_generation": {"progress": 80, "prefix": "📈"},
+                "final_synthesis": {"progress": 100, "prefix": "💡"}
+            }
+            
+            stage_info = stages_info.get(stage, {"progress": 0, "prefix": ""})
+            
+            # Create thought data
+            thought_data = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "stage": stage,
+                "thought": f"{stage_info['prefix']} {thought}",
+                "progress": stage_info['progress']
+            }
+            
+            # Update MongoDB
+            await GlobalState._db.analyses.update_one(
+                {"_id": ObjectId(task_id)},
+                {
+                    "$push": {"thoughts": thought_data},
+                    "$set": {"progress": stage_info['progress']}
+                }
+            )
+            
+            # Send WebSocket update
+            await manager.broadcast_update(task_id, {
+                "type": "thought_update",
+                "data": thought_data
+            })
+        
+        # Run analysis with thought tracking
+        results = await process_lens.analyze_dataset(df, thought_callback=thought_callback)
+        
+        # Update MongoDB with final results
+        update_data = {
+            "status": "completed",
+            "results": results,
+            "completed_at": datetime.utcnow().isoformat()
+        }
+        
+        await GlobalState._db.analyses.update_one(
+            {"_id": ObjectId(task_id)},
+            {"$set": update_data}
+        )
+        
+        # Send completion WebSocket update
+        await manager.broadcast_update(task_id, {
+            "type": "analysis_complete",
+            "data": update_data
+        })
+        
+        # Update file metadata
+        await storage.update_metadata(file_id, {
+            "analysis_completed": True,
+            "analysis_summary": {
+                "patterns_found": len(results.get("patterns", [])),
+                "metrics_analyzed": list(results.get("performance", {}).keys()),
+                "completed_at": datetime.utcnow().isoformat()
+            }
+        })
+        
+    except Exception as e:
+        error_detail = str(e)
+        logger.error(f"Error in background analysis: {error_detail}")
+        
+        # Update MongoDB with error status
+        error_update = {
+            "status": "failed",
+            "error": error_detail,
+            "completed_at": datetime.utcnow().isoformat()
+        }
+        
+        await GlobalState._db.analyses.update_one(
+            {"_id": ObjectId(task_id)},
+            {"$set": error_update}
+        )
+        
+        # Send error WebSocket update
+        await manager.broadcast_update(task_id, {
+            "type": "analysis_error",
+            "data": error_update
+        })
+        
+        # Update file metadata
+        await storage.update_metadata(file_id, {
+            "analysis_completed": False,
+            "analysis_error": error_detail
+        })
+
 @app.get("/status/{task_id}")
 async def get_analysis_status(task_id: str):
     """Get the status and results of an analysis task"""
     try:
-        # Get analysis data from MongoDB
-        analysis = await db.analyses.find_one({"_id": ObjectId(task_id)})
+        analysis = await GlobalState._db.analyses.find_one({"_id": ObjectId(task_id)})
         if not analysis:
-            raise HTTPException(
-                status_code=404,
-                detail="Analysis task not found"
-            )
-
-        # Convert MongoDB document to dictionary and handle serialization
-        analysis_dict = dict(analysis)
+            raise HTTPException(status_code=404, detail="Analysis not found")
         
         return JSONResponse(
-            content=json.loads(
-                json.dumps(analysis_dict, cls=JSONEncoder)
-            )
+            content=json.loads(json.dumps(dict(analysis), cls=CustomJSONEncoder))
         )
     except Exception as e:
         logger.error(f"Error retrieving analysis status: {e}")
@@ -325,140 +428,52 @@ async def get_analysis_status(task_id: str):
             detail=f"Error retrieving analysis status: {str(e)}"
         )
 
-@app.get("/projects")
-async def list_projects(skip: int = 0, limit: int = 10):
-    """List all analysis projects"""
-    projects = list(db.analyses.find({}).sort("created_at", -1).skip(skip).limit(limit))
-    return JSONResponse(content=json.loads(json.dumps(projects, cls=JSONEncoder)))
-
-@app.get("/health")
-async def health_check():
-    """Detailed health check endpoint"""
+@app.get("/files")
+async def list_files(skip: int = 0, limit: int = 10):
+    """List all uploaded files"""
     try:
-        # Test ProcessLens initialization
-        process_lens = get_process_lens()
-        return {
-            "status": "healthy",
-            "components": {
-                "ProcessLens": "operational",
-                "IBM_Granite": "connected"
-            }
-        }
+        storage = await GlobalState.get_storage()
+        files = await storage.list_files(skip=skip, limit=limit)
+        return JSONResponse(content=files)
     except Exception as e:
-        return JSONResponse(
-            content={
-                "status": "unhealthy",
-                "error": str(e)
-            },
-            status_code=503
-        )
-
-# Error handlers
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request, exc):
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={
-            "error": exc.detail,
-            "status_code": exc.status_code
-        }
-    )
-
-@app.exception_handler(Exception)
-async def general_exception_handler(request, exc):
-    return JSONResponse(
-        status_code=500,
-        content={
-            "error": str(exc),
-            "status_code": 500
-        }
-    )
-
-# Agent-specific endpoints
-@app.post("/analyze/timing")
-async def analyze_timing(
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(...)
-):
-    """Analyze timing metrics for a process dataset"""
-    try:
-        contents = await file.read()
-        df = pd.read_csv(pd.compat.StringIO(contents.decode('utf-8')))
-        
-        process_lens = get_process_lens()
-        timing_agent = process_lens.optimizer.metrics_agents["timing"]
-        results = await timing_agent.analyze(df)
-        
-        return JSONResponse(content=results)
-    except Exception as e:
-        logger.error(f"Error in timing analysis: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/analyze/quality")
-async def analyze_quality(
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(...)
-):
-    """Analyze quality metrics for a process dataset"""
+@app.get("/files/{file_id}")
+async def get_file_info(file_id: str):
+    """Get file metadata"""
     try:
-        contents = await file.read()
-        df = pd.read_csv(pd.compat.StringIO(contents.decode('utf-8')))
-        
-        process_lens = get_process_lens()
-        quality_agent = process_lens.optimizer.metrics_agents["quality"]
-        results = await quality_agent.analyze(df)
-        
-        return JSONResponse(content=results)
+        storage = await GlobalState.get_storage()
+        metadata = await storage.get_metadata(ObjectId(file_id))
+        return JSONResponse(content=metadata)
     except Exception as e:
-        logger.error(f"Error in quality analysis: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/analyze/resources")
-async def analyze_resources(
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(...)
-):
-    """Analyze resource utilization metrics for a process dataset"""
+@app.delete("/files/{file_id}")
+async def delete_file(file_id: str):
+    """Delete a file"""
     try:
-        contents = await file.read()
-        df = pd.read_csv(pd.compat.StringIO(contents.decode('utf-8')))
-        
-        process_lens = get_process_lens()
-        resource_agent = process_lens.optimizer.metrics_agents["resource"]
-        results = await resource_agent.analyze(df)
-        
-        return JSONResponse(content=results)
+        storage = await GlobalState.get_storage()
+        success = await storage.delete_file(ObjectId(file_id))
+        if success:
+            return JSONResponse(content={"message": "File deleted successfully"})
+        else:
+            raise HTTPException(status_code=500, detail="Failed to delete file")
     except Exception as e:
-        logger.error(f"Error in resource analysis: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Startup and shutdown events
-@app.on_event("startup")
-async def startup_db_client():
-    global db
-    try:
-        db = await Database.connect_db()
-        logger.info("ProcessLens API started, database connected")
-    except Exception as e:
-        logger.error(f"Failed to connect to database: {e}")
-        raise
-
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    try:
-        await Database.close_db()
-        logger.info("ProcessLens API shutdown, database disconnected")
-    except Exception as e:
-        logger.error(f"Error during database shutdown: {e}")
-        raise
-
-# Add storage cleanup task
 @app.post("/admin/cleanup")
 async def cleanup_old_data(days: int = 30):
-    """Clean up old analyses data"""
+    """Clean up old analyses and files"""
     try:
-        await Database.cleanup_old_analyses(days)
-        return {"message": f"Successfully cleaned up analyses older than {days} days"}
+        storage = await GlobalState.get_storage()
+        deleted_files = await storage.cleanup_old_files(days)
+        deleted_analyses = await Database.cleanup_old_analyses(days)
+        
+        return {
+            "message": "Cleanup completed",
+            "deleted_files": deleted_files,
+            "deleted_analyses": deleted_analyses
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

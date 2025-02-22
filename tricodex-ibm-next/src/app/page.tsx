@@ -1,11 +1,10 @@
 "use client"
 
-import { useEffect, useState, useCallback } from "react"
+import { useState, useEffect } from "react"
 import { AppSidebar } from "@/components/app-sidebar"
 import {
   Breadcrumb,
   BreadcrumbItem,
-  BreadcrumbLink,
   BreadcrumbList,
   BreadcrumbPage,
   BreadcrumbSeparator,
@@ -17,7 +16,6 @@ import {
   SidebarTrigger,
 } from "@/components/ui/sidebar"
 import { FileUpload } from "@/components/ui/file-upload"
-import { useAnimatedText } from "@/components/ui/animated-text"
 import { Button } from "@/components/ui/button"
 import { 
   Bot,
@@ -26,7 +24,6 @@ import {
   Activity,
   Users,
   Download,
-  RefreshCw
 } from "lucide-react"
 import { ProcessMetrics } from "@/components/process/process-metrics"
 import { ProcessPatterns } from "@/components/process/process-patterns"
@@ -34,104 +31,65 @@ import { ResourceAnalysis } from "@/components/process/resource-analysis"
 import { AnalysisPDF } from "@/components/process/analysis-pdf"
 import { pdf } from '@react-pdf/renderer'
 import { saveAs } from 'file-saver'
-import { startAnalysis, checkAnalysisStatus } from "@/lib/api"
+import { startAnalysis } from "@/lib/api"
 import { toast } from 'sonner'
 import { Toaster } from 'sonner'
-
-// Define types for our data structures
-type ThoughtMessage = {
-  timestamp: string
-  stage: string
-  thought: string
-  progress: number
-}
-
-type AnalysisResult = {
-  task_id: string
-  status: "processing" | "completed" | "failed"
-  progress: number
-  thoughts: ThoughtMessage[]
-  results?: {
-    structure: any
-    patterns: any[]
-    performance: any
-    improvements: any
-    synthesis: any
-  }
-}
+import { useAnalysisSocket } from "@/hooks/useAnalysisSocket"
 
 export default function ProcessLensPage() {
-  const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null)
+  const [taskId, setTaskId] = useState<string | null>(null)
   const [activeSection, setActiveSection] = useState<string>("upload")
-  const [isPolling, setIsPolling] = useState(false)
-
-  const currentThought = analysisResult?.thoughts?.[analysisResult.thoughts.length - 1]?.thought || ""
-  const animatedThought = useAnimatedText(currentThought, " ")
+  
+  // Use the WebSocket hook
+  const { isConnected, error, thoughts, results, latestThought } = useAnalysisSocket(taskId)
 
   const handleFileUpload = async (files: File[]) => {
     if (!files.length) return
+
+    setActiveSection("analysis") // Update UI immediately to show analysis view
 
     const formData = new FormData()
     formData.append("file", files[0])
     formData.append("project_name", "Process Analysis " + new Date().toLocaleDateString())
 
     try {
-      toast.promise(startAnalysis(formData), {
-        loading: 'Starting analysis...',
-        success: (data) => {
-          setAnalysisResult({
-            task_id: data.task_id,
-            status: "processing",
-            progress: 0,
-            thoughts: []
-          })
-          setIsPolling(true)
-          setActiveSection("analysis")
-          return 'Analysis started successfully'
-        },
-        error: (err) => {
-          console.error("Upload error:", err)
-          return 'Failed to start analysis'
+      await toast.promise(
+        startAnalysis(formData).then(data => {
+          setTaskId(data.task_id)
+          return data
+        }),
+        {
+          loading: 'Starting analysis...',
+          success: (data) => `Analysis started successfully - Task ID: ${data.task_id}`,
+          error: (err) => {
+            console.error("Upload error:", err)
+            setActiveSection("upload") // Reset on error
+            return err.message || 'Failed to start analysis'
+          }
         }
-      })
+      )
     } catch (error) {
       console.error("Upload error:", error)
       toast.error('Failed to upload file')
+      setActiveSection("upload")
     }
   }
 
-  const pollStatus = useCallback(async () => {
-    if (!analysisResult?.task_id || !isPolling) return
-
-    try {
-      const data = await checkAnalysisStatus(analysisResult.task_id)
-      setAnalysisResult(data)
-      
-      if (data.status === "completed" || data.status === "failed") {
-        setIsPolling(false)
-      }
-    } catch (error) {
-      console.error("Polling error:", error)
-      setIsPolling(false)
-    }
-  }, [analysisResult?.task_id, isPolling])
-
-  useEffect(() => {
-    let interval: NodeJS.Timeout
-    if (isPolling) {
-      interval = setInterval(pollStatus, 2000)
-    }
-    return () => clearInterval(interval)
-  }, [isPolling, pollStatus])
-
   const handleDownloadPDF = async () => {
-    if (!analysisResult) return
+    if (!results) return
     
     try {
-      toast.promise(
-        pdf(<AnalysisPDF data={analysisResult} />).toBlob().then(blob => {
+      await toast.promise(
+        pdf(<AnalysisPDF data={{ 
+          thoughts, 
+          results,
+          status: results ? 'completed' : 'processing',
+          progress: results ? 100 : latestThought?.progress || 0,
+          task_id: taskId || ''
+        }} />).toBlob().then(blob => {
           saveAs(blob, `process-analysis-${new Date().toISOString()}.pdf`)
-        }), {
+        }),
+        {
           loading: 'Generating PDF...',
           success: 'PDF downloaded successfully',
           error: 'Failed to generate PDF'
@@ -142,6 +100,13 @@ export default function ProcessLensPage() {
       toast.error('Failed to generate PDF')
     }
   }
+
+  // Display error toast when WebSocket error occurs
+  useEffect(() => {
+    if (error) {
+      toast.error(error)
+    }
+  }, [error])
 
   return (
     <SidebarProvider>
@@ -165,7 +130,7 @@ export default function ProcessLensPage() {
                 </BreadcrumbList>
               </Breadcrumb>
             </div>
-            {analysisResult?.status === "completed" && (
+            {results && (
               <Button onClick={handleDownloadPDF} variant="outline">
                 <Download className="mr-2 h-4 w-4" />
                 Download Report
@@ -181,24 +146,49 @@ export default function ProcessLensPage() {
             </div>
           ) : (
             <div className="grid gap-6">
+              {/* Connection Status */}
+              <div className="flex items-center gap-2">
+                <div 
+                  className={`h-2 w-2 rounded-full ${
+                    isConnected ? 'bg-green-500 animate-pulse' : 'bg-red-500'
+                  }`} 
+                />
+                <span className="text-sm text-muted-foreground">
+                  {isConnected ? 'Processing Analysis...' : error ? 'Connection Error' : 'Analysis Complete'}
+                </span>
+              </div>
+
+              {/* Error Display */}
+              {error && (
+                <div className="rounded-lg border border-destructive bg-destructive/10 p-4 text-destructive">
+                  {error}
+                  <Button 
+                    variant="outline" 
+                    className="mt-2"
+                    onClick={() => window.location.reload()}
+                  >
+                    Retry
+                  </Button>
+                </div>
+              )}
+
               {/* Progress Section */}
               <div className="rounded-lg border bg-card p-6">
                 <div className="flex items-center justify-between mb-4">
                   <h2 className="text-lg font-semibold">Analysis Progress</h2>
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm text-muted-foreground">
-                      {analysisResult?.progress || 0}%
-                    </span>
-                    {isPolling && (
-                      <RefreshCw className="h-4 w-4 animate-spin" />
-                    )}
-                  </div>
+                  <span className="text-sm text-muted-foreground">
+                    {latestThought?.progress || 0}%
+                  </span>
                 </div>
                 <div className="h-2 w-full bg-secondary rounded-full overflow-hidden">
                   <div
                     className="h-full bg-primary transition-all duration-500"
-                    style={{ width: `${analysisResult?.progress || 0}%` }}
-                  />
+                    style={{ width: `${latestThought?.progress || 0}%` }}
+                  >
+                    {isConnected && (
+                      <div className="h-full w-full animate-pulse bg-primary/50" />
+                    )}
+                  </div>
                 </div>
               </div>
 
@@ -206,7 +196,7 @@ export default function ProcessLensPage() {
               <div className="rounded-lg border bg-card p-6">
                 <h2 className="text-lg font-semibold mb-4">Analysis Thoughts</h2>
                 <div className="space-y-4 max-h-[400px] overflow-y-auto">
-                  {analysisResult?.thoughts.map((thought, index) => (
+                  {thoughts.map((thought, index) => (
                     <div
                       key={index}
                       className="flex items-start gap-4 p-4 rounded-lg bg-muted/50"
@@ -224,14 +214,14 @@ export default function ProcessLensPage() {
               </div>
 
               {/* Results Sections - Only show when complete */}
-              {analysisResult?.status === "completed" && (
+              {results && (
                 <div className="grid gap-6 md:grid-cols-2">
                   <div className="rounded-lg border bg-card p-6">
                     <div className="flex items-center gap-2 mb-4">
                       <Activity className="h-5 w-5 text-primary" />
                       <h2 className="text-lg font-semibold">Performance Metrics</h2>
                     </div>
-                    <ProcessMetrics data={analysisResult.results} />
+                    <ProcessMetrics data={results} />
                   </div>
 
                   <div className="rounded-lg border bg-card p-6">
@@ -239,7 +229,7 @@ export default function ProcessLensPage() {
                       <TimerIcon className="h-5 w-5 text-primary" />
                       <h2 className="text-lg font-semibold">Process Patterns</h2>
                     </div>
-                    <ProcessPatterns data={analysisResult.results} />
+                    <ProcessPatterns data={results} />
                   </div>
 
                   <div className="rounded-lg border bg-card p-6">
@@ -247,7 +237,7 @@ export default function ProcessLensPage() {
                       <Users className="h-5 w-5 text-primary" />
                       <h2 className="text-lg font-semibold">Resource Analysis</h2>
                     </div>
-                    <ResourceAnalysis data={analysisResult.results} />
+                    <ResourceAnalysis data={results} />
                   </div>
 
                   <div className="rounded-lg border bg-card p-6">
@@ -256,7 +246,7 @@ export default function ProcessLensPage() {
                       <h2 className="text-lg font-semibold">Recommendations</h2>
                     </div>
                     <div className="space-y-4">
-                      {analysisResult.results?.improvements?.map((improvement: any, index: number) => (
+                      {results?.improvements?.map((improvement: any, index: number) => (
                         <div key={index} className="p-4 rounded-lg bg-muted/50">
                           <div className="font-medium mb-2">{improvement.action}</div>
                           <div className="text-sm text-muted-foreground">
