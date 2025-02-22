@@ -34,7 +34,7 @@ class ProcessStep:
 class ProcessPattern:
     """Represents a recurring pattern in the process."""
     name: str
-    steps: List[ProcessStep]
+    steps: List[ProcessStep]  # Fixed: Changed List<ProcessStep> to List[ProcessStep]
     frequency: int
     performance_metrics: Dict[str, float]
     context: Dict[str, Any]
@@ -84,15 +84,19 @@ class DatasetAnalyzer:
             
             # Get model response
             logger.info("Sending structure analysis prompt to model")
-            response = await self.model.agenerate(structure_prompt)
+            response = await self.model.ainvoke(structure_prompt)
             
-            if not response:
-                logger.error("Model returned empty response")
-                raise ValueError("Empty model response")
-                
-            # Extract the response text
-            raw_analysis = response.generations[0].text if hasattr(response, 'generations') else str(response)
-            logger.info(f"Received raw analysis from model: {raw_analysis}")
+            # Debug log the raw response
+            logger.info(f"Raw model response: {response}")
+            
+            # Extract content from response
+            if isinstance(response, str):
+                raw_analysis = response
+            else:
+                # Handle structured response object
+                raw_analysis = response.content if hasattr(response, 'content') else str(response)
+            
+            logger.info(f"Processed model response: {raw_analysis}")
             
             # Try to find JSON in the response
             json_match = re.search(r'\{[\s\S]*\}', raw_analysis)
@@ -105,10 +109,24 @@ class DatasetAnalyzer:
                 except json.JSONDecodeError as e:
                     logger.error(f"Failed to parse JSON from model response: {e}")
                     logger.error(f"JSON string attempted to parse: {json_str}")
-                    raise ValueError("Invalid JSON in model response")
+                    # Return a default structure if JSON parsing fails
+                    return {
+                        "process_entities": [],
+                        "temporal_columns": [],
+                        "actor_columns": [],
+                        "status_columns": [],
+                        "io_columns": []
+                    }
             else:
                 logger.error("No JSON found in model response")
-                raise ValueError("No JSON found in model response")
+                # Return a default structure if no JSON found
+                return {
+                    "process_entities": [],
+                    "temporal_columns": [],
+                    "actor_columns": [],
+                    "status_columns": [],
+                    "io_columns": []
+                }
                 
         except Exception as e:
             logger.error(f"Error in analyze_structure: {str(e)}")

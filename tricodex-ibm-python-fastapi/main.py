@@ -95,7 +95,7 @@ class ConnectionManager:
         self._lock = asyncio.Lock()
         
     async def connect(self, websocket: WebSocket, task_id: str):
-        await websocket.accept()
+        # Remove the websocket.accept() from here since it's called in the endpoint
         async with self._lock:
             if task_id not in self.active_connections:
                 self.active_connections[task_id] = []
@@ -239,11 +239,10 @@ async def analyze_dataset(
 async def websocket_endpoint(websocket: WebSocket, task_id: str):
     """WebSocket endpoint for real-time analysis updates"""
     try:
-        # Accept connection first
-        await websocket.accept()
+        await websocket.accept()  # Accept connection once
         logger.info(f"WebSocket connection established for task {task_id}")
         
-        # Then add to manager
+        # Add to manager (removed accept() from here)
         await manager.connect(websocket, task_id)
         
         # Send initial state
@@ -297,26 +296,31 @@ async def analyze_in_background(task_id: str, file_id: ObjectId):
         storage = await GlobalState.get_storage()
         df = await storage.get_dataframe(file_id)
         
-        # Initialize WatsonX LLM with correct credential format
+        # Add debug parameters for the model
         model_params = {
             "decoding_method": "greedy",
             "max_new_tokens": 1024,
             "min_new_tokens": 1,
             "repetition_penalty": 1.2,
-            "temperature": 0.7
+            "temperature": 0.7,
+            "stop_sequences": ["</s>", "\n\n"]  # Add stop sequences
         }
         
-        # Changed: Pass credentials directly instead of nested dict
+        # Initialize the model with debug logging
         granite_model = WatsonxLLM(
             model_id="ibm/granite-3-8b-instruct",
-            apikey=os.getenv("IBM_API_KEY"),  # Direct parameter
-            url=os.getenv("WATSONX_URL"),     # Direct parameter
+            apikey=os.getenv("IBM_API_KEY"),
+            url=os.getenv("WATSONX_URL"),
             project_id=os.getenv("PROJECT_ID"),
             params=model_params
         )
         
+        # Log model initialization
+        logger.info("Initialized WatsonxLLM model")
+        
         process_lens = ProcessLens(granite_model)
         
+        # Enhanced thought callback with logging
         async def thought_callback(stage: str, thought: str):
             stages_info = {
                 "structure_analysis": {"progress": 20, "prefix": "📊"},
@@ -350,10 +354,14 @@ async def analyze_in_background(task_id: str, file_id: ObjectId):
                 "type": "thought_update",
                 "data": thought_data
             })
+            
+            logger.info(f"Thought generated - Stage: {stage}, Thought: {thought}")
         
-        # Run analysis with thought tracking
+        # Run analysis with enhanced logging
+        logger.info("Starting process analysis...")
         results = await process_lens.analyze_dataset(df, thought_callback=thought_callback)
-        
+        logger.info(f"Analysis completed with results: {json.dumps(results, default=str)}")
+
         # Update MongoDB with final results
         update_data = {
             "status": "completed",
