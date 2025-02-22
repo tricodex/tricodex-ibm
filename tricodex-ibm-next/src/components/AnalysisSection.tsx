@@ -56,6 +56,12 @@ export const AnalysisSection = ({
   const isProcessing = isPolling || analysisResult?.status === "processing";
   const [showMetrics, setShowMetrics] = useState(false);
 
+  // Determine loading state
+  const loadingState = !analysisResult ? 'initial' :
+    isProcessing ? 'processing' :
+    analysisResult.status === 'failed' ? 'error' :
+    'complete'
+
   useEffect(() => {
     if (analysisResult?.status === "completed") {
       const timer = setTimeout(() => setShowMetrics(true), 500);
@@ -63,13 +69,28 @@ export const AnalysisSection = ({
     }
   }, [analysisResult?.status]);
 
+  // Loading state renderer
+  const renderLoadingState = () => (
+    <div className="rounded-lg border bg-card p-6 animate-pulse">
+      <div className="flex items-center space-x-4">
+        <div className="h-12 w-12 rounded-full bg-primary/10 animate-spin" />
+        <div className="space-y-2">
+          <div className="h-4 w-48 bg-primary/10 rounded" />
+          <div className="h-3 w-36 bg-primary/10 rounded" />
+        </div>
+      </div>
+    </div>
+  )
+
   return (
     <div className="space-y-8">
-      {/* Progress Header */}
+      {/* Progress Header with Improved Animation */}
       <div className="rounded-lg border bg-card p-6">
         <div className="flex items-center justify-between mb-4">
           <TextShimmer as="h2" className="text-lg font-semibold">
-            Analysis Progress
+            {`Analysis ${loadingState === 'initial' ? 'Ready' : 
+                     loadingState === 'processing' ? 'In Progress' :
+                     loadingState === 'error' ? 'Error' : 'Complete'}`}
           </TextShimmer>
           <div className="flex items-center gap-2">
             <span className="text-sm text-muted-foreground">
@@ -81,26 +102,22 @@ export const AnalysisSection = ({
           </div>
         </div>
         
-        {/* Animated Progress Bar */}
+        {/* Enhanced Progress Bar */}
         <div className="relative h-2 w-full bg-muted rounded-full overflow-hidden">
           <div
-            className="absolute inset-0 bg-primary transition-all duration-500 ease-out"
+            className={cn(
+              "absolute inset-0 bg-primary transition-all duration-500 ease-out",
+              loadingState === 'processing' && "animate-pulse"
+            )}
             style={{ width: `${analysisResult?.progress || 0}%` }}
           />
           {isProcessing && (
-            <div
-              className="absolute inset-0 bg-primary/30 animate-[shimmer_2s_infinite]"
-              style={{
-                backgroundImage: 'linear-gradient(90deg, transparent, hsl(var(--primary)/0.4), transparent)',
-                backgroundSize: '200% 100%',
-                backgroundPosition: '200% 0',
-              }}
-            />
+            <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/25 to-transparent animate-shimmer" />
           )}
         </div>
       </div>
 
-      {/* Thoughts Stream */}
+      {/* Thoughts Stream with Enhanced Animation */}
       <div className="rounded-lg border bg-card p-6">
         <AnimatedThoughts 
           thoughts={analysisResult?.thoughts || []} 
@@ -108,9 +125,9 @@ export const AnalysisSection = ({
         />
       </div>
 
-      {/* Results Sections */}
+      {/* Results Section with Fade-In Animation */}
       {analysisResult?.status === "completed" && analysisResult.results && (
-        <div className="space-y-6">
+        <div className="space-y-6 animate-fade-in">
           <div className="flex items-center justify-between">
             <TextShimmer as="h2" className="text-lg font-semibold">
               Analysis Results
