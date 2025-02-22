@@ -83,3 +83,5 @@ prompts/
 copilot-instructions.md
 .github/
 notes/
+
+public/logo/*

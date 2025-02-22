@@ -312,6 +312,70 @@ class ProcessLens:
         self.analyzer = DatasetAnalyzer(granite_model)
         self.miner = ProcessMiner(granite_model)
         self.optimizer = ProcessOptimizer(granite_model)
+        
+        # Define function specs for dataset analysis
+        self.dataset_analysis_spec = {
+            "name": "analyze_process_dataset",
+            "description": "Analyze process dataset structure and identify key components",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "structure": {
+                        "type": "object",
+                        "properties": {
+                            "process_entities": {"type": "array", "items": {"type": "string"}},
+                            "temporal_columns": {"type": "array", "items": {"type": "string"}},
+                            "activity_columns": {"type": "array", "items": {"type": "string"}},
+                            "resource_columns": {"type": "array", "items": {"type": "string"}}
+                        }
+                    },
+                    "process_characteristics": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string"},
+                            "complexity": {"type": "number"},
+                            "variability": {"type": "number"}
+                        }
+                    }
+                },
+                "required": ["structure", "process_characteristics"]
+            }
+        }
+        
+        self.synthesis_spec = {
+            "name": "synthesize_process_analysis",
+            "description": "Synthesize complete process analysis and recommendations",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "key_findings": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "area": {"type": "string"},
+                                "insight": {"type": "string"},
+                                "confidence": {"type": "number"},
+                                "impact": {"type": "number"}
+                            }
+                        }
+                    },
+                    "recommendations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "action": {"type": "string"},
+                                "expected_impact": {"type": "number"},
+                                "implementation_complexity": {"type": "number"},
+                                "prerequisites": {"type": "array", "items": {"type": "string"}}
+                            }
+                        }
+                    }
+                },
+                "required": ["key_findings", "recommendations"]
+            }
+        }
     
     async def analyze_dataset(self, df: pd.DataFrame, thought_callback=None) -> Dict[str, Any]:
         """Complete analysis of a process dataset using RAR with thought tracking."""
@@ -358,7 +422,7 @@ class ProcessLens:
             thought = await get_model_thought("structure_analysis")
             thought_callback("structure_analysis", thought)
             
-        structure = await self.analyzer.analyze_structure_with_functions(df, [dataset_analysis_spec])
+        structure = await self.analyzer.analyze_structure_with_functions(df, [self.dataset_analysis_spec])
         
         # 2. Extract and analyze process patterns
         if thought_callback:
@@ -398,7 +462,7 @@ class ProcessLens:
                 "performance": performance,
                 "improvements": improvements
             }),
-            [synthesis_spec]
+            [self.synthesis_spec]
         )
         
         return {

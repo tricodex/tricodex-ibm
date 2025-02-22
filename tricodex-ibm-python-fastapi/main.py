@@ -7,7 +7,15 @@ from dotenv import load_dotenv
 from langchain_ibm import WatsonxLLM
 from processlens import ProcessLens
 import logging
-from typing import Optional
+from typing import Optional, Dict, Any, List
+import json
+from datetime import datetime
+from bson import ObjectId
+import io
+import openpyxl
+import chardet
+import motor.motor_asyncio
+from db import Database
 
 # Load environment variables
 load_dotenv()
@@ -49,8 +57,13 @@ async def add_security_headers(request, call_next):
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
 
+# MongoDB configuration
+MONGODB_URL = os.getenv("MONGODB_URL", "mongodb+srv://your-cluster.mongodb.net")
+client = motor.motor_asyncio.AsyncIOMotorClient(MONGODB_URL)
+db = client.processlens_db
+
 # Store background tasks results
-analysis_results = {}
+analysis_results = {} 
 
 # Helper function to initialize WatsonxLLM and ProcessLens
 def get_process_lens():
@@ -89,81 +102,100 @@ def get_process_lens():
             detail={"error": "Error initializing ProcessLens", "details": str(e)}
         )
 
+async def parse_document(file: UploadFile) -> pd.DataFrame:
+    """Parse different document formats into a pandas DataFrame"""
+    contents = await file.read()
+    
+    if file.content_type == "text/csv":
+        # Detect encoding
+        encoding = chardet.detect(contents)['encoding']
+        return pd.read_csv(io.StringIO(contents.decode(encoding)))
+    
+    elif file.content_type in ["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/vnd.ms-excel"]:
+        return pd.read_excel(io.BytesIO(contents))
+    
+    elif file.content_type == "application/json":
+        return pd.DataFrame(json.loads(contents.decode('utf-8')))
+    
+    elif file.content_type == "text/xml":
+        return pd.read_xml(io.StringIO(contents.decode('utf-8')))
+    
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type: {file.content_type}. Supported types: CSV, Excel, JSON, XML"
+        )
+
+class JSONEncoder(json.JSONEncoder):
+    """Custom JSON encoder for MongoDB ObjectId and datetime objects"""
+    def default(self, obj):
+        if isinstance(obj, ObjectId):
+            return str(obj)
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        return super().default(obj)
+
 # Background task for analysis
 async def analyze_in_background(task_id: str, df: pd.DataFrame):
     """Background task that handles process analysis and captures model thoughts"""
     try:
         process_lens = get_process_lens()
         
-        # Create thought callback with structured format
-        def thought_callback(stage: str, thought: str):
+        async def thought_callback(stage: str, thought: str):
             stages_info = {
-                "structure_analysis": {
-                    "progress": 20,
-                    "prompt_prefix": "Dataset Structure 📊: "
-                },
-                "pattern_mining": {
-                    "progress": 40,
-                    "prompt_prefix": "Process Pattern 🔄: "
-                },
-                "performance_analysis": {
-                    "progress": 60,
-                    "prompt_prefix": "Performance Metric ⚡: "
-                },
-                "improvement_generation": {
-                    "progress": 80,
-                    "prompt_prefix": "Improvement 📈: "
-                },
-                "final_synthesis": {
-                    "progress": 100,
-                    "prompt_prefix": "Key Insights 💡: "
-                }
+                "structure_analysis": {"progress": 20, "prompt_prefix": "Dataset Structure 📊: "},
+                "pattern_mining": {"progress": 40, "prompt_prefix": "Process Pattern 🔄: "},
+                "performance_analysis": {"progress": 60, "prompt_prefix": "Performance Metric ⚡: "},
+                "improvement_generation": {"progress": 80, "prompt_prefix": "Improvement 📈: "},
+                "final_synthesis": {"progress": 100, "prompt_prefix": "Key Insights 💡: "}
             }
             
             stage_info = stages_info.get(stage, {"progress": 0, "prompt_prefix": ""})
             
-            analysis_results[task_id]["thoughts"].append({
-                "timestamp": pd.Timestamp.now().isoformat(),
-                "stage": stage,
-                "thought": f"{stage_info['prompt_prefix']}{thought}",
-                "progress": stage_info['progress']
-            })
-            analysis_results[task_id]["progress"] = stage_info['progress']
-        
-        # Initialize analysis with thought tracking
-        analysis_results[task_id].update({
-            "status": "processing",
-            "progress": 0,
-            "thoughts": []
-        })
-        
-        thought_callback("initialization", "Initializing process analysis pipeline...")
+            # Update MongoDB with new thought
+            await db.analyses.update_one(
+                {"_id": ObjectId(task_id)},
+                {
+                    "$push": {
+                        "thoughts": {
+                            "timestamp": datetime.utcnow(),
+                            "stage": stage,
+                            "thought": f"{stage_info['prompt_prefix']}{thought}",
+                            "progress": stage_info['progress']
+                        }
+                    },
+                    "$set": {
+                        "progress": stage_info['progress']
+                    }
+                }
+            )
         
         # Run analysis with thought tracking
-        results = await process_lens.analyze_dataset(
-            df,
-            thought_callback=thought_callback
+        results = await process_lens.analyze_dataset(df, thought_callback=thought_callback)
+        
+        # Store final results in MongoDB
+        await db.analyses.update_one(
+            {"_id": ObjectId(task_id)},
+            {
+                "$set": {
+                    "status": "completed",
+                    "results": results,
+                    "completed_at": datetime.utcnow()
+                }
+            }
         )
-        
-        # Final success message
-        thought_callback("completion", "✅ Analysis completed successfully with actionable insights ready for review.")
-        
-        analysis_results[task_id].update({
-            "status": "completed",
-            "results": results
-        })
         
     except Exception as e:
         logger.error(f"Error in background analysis: {str(e)}")
-        analysis_results[task_id].update({
-            "status": "failed",
-            "error": str(e),
-            "thoughts": analysis_results[task_id].get("thoughts", []) + [{
-                "timestamp": pd.Timestamp.now().isoformat(),
-                "stage": "error",
-                "thought": f"Error occurred: {str(e)}"
-            }]
-        })
+        await db.analyses.update_one(
+            {"_id": ObjectId(task_id)},
+            {
+                "$set": {
+                    "status": "failed",
+                    "error": str(e)
+                }
+            }
+        )
 
 @app.get("/")
 async def root():
@@ -176,32 +208,53 @@ async def root():
 @app.post("/analyze")
 async def analyze_dataset(
     background_tasks: BackgroundTasks,
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    project_name: str = None
 ):
     """
-    Analyze a process dataset from a CSV file
+    Analyze a process dataset from various document formats
     Returns a task ID that can be used to check the analysis status
     """
-    if file.content_type != "text/csv":
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid file type. Only CSV files are accepted."
-        )
-    
     try:
-        # Read the uploaded CSV file into pandas DataFrame
-        contents = await file.read()
-        df = pd.read_csv(pd.compat.StringIO(contents.decode('utf-8')))
+        # Check file size
+        max_size = int(os.getenv("MAX_UPLOAD_SIZE", 10485760))  # 10MB default
+        file_size = 0
+        contents = b""
         
-        # Generate task ID
-        task_id = f"task_{len(analysis_results)}"
+        # Read file in chunks to check size
+        while chunk := await file.read(8192):
+            contents += chunk
+            file_size += len(chunk)
+            if file_size > max_size:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"File too large. Maximum size is {max_size/1048576:.1f}MB"
+                )
         
-        # Initialize task status
-        analysis_results[task_id] = {
+        # Reset file pointer
+        file.file = io.BytesIO(contents)
+        
+        # Parse the uploaded file into DataFrame
+        df = await parse_document(file)
+        
+        # Generate task ID and project info
+        task_id = str(ObjectId())
+        project_info = {
+            "name": project_name or file.filename,
+            "created_at": datetime.utcnow(),
+            "file_type": file.content_type,
+            "columns": list(df.columns),
+            "row_count": len(df)
+        }
+        
+        # Store initial analysis info in MongoDB
+        await db.analyses.insert_one({
+            "_id": ObjectId(task_id),
             "status": "processing",
             "progress": 0,
-            "thoughts": []
-        }
+            "thoughts": [],
+            "project": project_info
+        })
         
         # Start background analysis
         background_tasks.add_task(analyze_in_background, task_id, df)
@@ -209,7 +262,8 @@ async def analyze_dataset(
         return JSONResponse(
             content={
                 "message": "Analysis started",
-                "task_id": task_id
+                "task_id": task_id,
+                "project": project_info
             },
             status_code=202
         )
@@ -224,13 +278,21 @@ async def analyze_dataset(
 @app.get("/status/{task_id}")
 async def get_analysis_status(task_id: str):
     """Get the status and results of an analysis task"""
-    if task_id not in analysis_results:
+    analysis = await db.analyses.find_one({"_id": ObjectId(task_id)})
+    if not analysis:
         raise HTTPException(
             status_code=404,
-            detail="Task not found"
+            detail="Analysis task not found"
         )
     
-    return analysis_results[task_id]
+    return JSONResponse(content=json.loads(json.dumps(analysis, cls=JSONEncoder)))
+
+@app.get("/projects")
+async def list_projects(skip: int = 0, limit: int = 10):
+    """List all analysis projects"""
+    cursor = db.analyses.find({}).sort("created_at", -1).skip(skip).limit(limit)
+    projects = await cursor.to_list(length=limit)
+    return JSONResponse(content=json.loads(json.dumps(projects, cls=JSONEncoder)))
 
 @app.get("/health")
 async def health_check():
@@ -331,6 +393,27 @@ async def analyze_resources(
         return JSONResponse(content=results)
     except Exception as e:
         logger.error(f"Error in resource analysis: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Startup and shutdown events
+@app.on_event("startup")
+async def startup_db_client():
+    await Database.connect_db()
+    logger.info("ProcessLens API started, database connected")
+
+@app.on_event("shutdown")
+async def shutdown_db_client():
+    await Database.close_db()
+    logger.info("ProcessLens API shutdown, database disconnected")
+
+# Add storage cleanup task
+@app.post("/admin/cleanup")
+async def cleanup_old_data(days: int = 30):
+    """Clean up old analyses data"""
+    try:
+        await Database.cleanup_old_analyses(days)
+        return {"message": f"Successfully cleaned up analyses older than {days} days"}
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":

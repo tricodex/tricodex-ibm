@@ -1,7 +1,7 @@
-"use client"
-
 import * as React from "react"
 import { ChevronsUpDown, Plus } from "lucide-react"
+import Image from "next/image"
+import { useTheme } from "next-themes"
 
 import {
   DropdownMenu,
@@ -19,12 +19,29 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar"
 
+// Create a logo component that handles color inversion
+const LogoImage = ({ className }: { className?: string }) => {
+  const { theme } = useTheme()
+  
+  return (
+    <div className={`relative aspect-[4/3] w-full ${className}`}>
+      <Image
+        src="/logo.svg"
+        alt="PROCESSLENS Logo"
+        fill
+        className={`object-contain ${theme === 'light' ? 'invert' : ''}`}
+        priority
+      />
+    </div>
+  )
+}
+
 export function TeamSwitcher({
   teams,
 }: {
   teams: {
     name: string
-    logo: React.ElementType
+    logo: string
     plan: string
   }[]
 }) {
@@ -40,8 +57,8 @@ export function TeamSwitcher({
               size="lg"
               className="data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground"
             >
-              <div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
-                <activeTeam.logo className="size-4" />
+              <div className="flex aspect-[4/3] h-8 items-center justify-center rounded-lg bg-background p-0.5">
+                <LogoImage />
               </div>
               <div className="grid flex-1 text-left text-sm leading-tight">
                 <span className="truncate font-semibold">
@@ -67,8 +84,8 @@ export function TeamSwitcher({
                 onClick={() => setActiveTeam(team)}
                 className="gap-2 p-2"
               >
-                <div className="flex size-6 items-center justify-center rounded-sm border">
-                  <team.logo className="size-4 shrink-0" />
+                <div className="flex aspect-[4/3] h-6 items-center rounded-sm border bg-background p-0.5">
+                  <LogoImage />
                 </div>
                 {team.name}
                 <DropdownMenuShortcut>⌘{index + 1}</DropdownMenuShortcut>

@@ -12,6 +12,11 @@ import {
   PieChart,
   Settings2,
   SquareTerminal,
+  Activity,
+  Users,
+  HeadphonesIcon,
+  LineChart,
+  Network,
 } from "lucide-react"
 
 import { NavMain } from "@/components/nav-main"
@@ -26,67 +31,48 @@ import {
   SidebarRail,
 } from "@/components/ui/sidebar"
 
-// This is sample data.
 const data = {
   user: {
-    name: "shadcn",
-    email: "m@example.com",
-    avatar: "/avatars/shadcn.jpg",
+    name: "Process Admin",
+    email: "admin@processlens.com",
+    avatar: "/logo-crop.png",
   },
   teams: [
     {
-      name: "Acme Inc",
-      logo: GalleryVerticalEnd,
+      name: "PL",
+      logo: "/logo-crop.png",
       plan: "Enterprise",
-    },
-    {
-      name: "Acme Corp.",
-      logo: AudioWaveform,
-      plan: "Startup",
-    },
-    {
-      name: "Evil Corp.",
-      logo: Command,
-      plan: "Free",
-    },
+    }
   ],
   navMain: [
     {
-      title: "Playground",
+      title: "Process Mining",
       url: "#",
-      icon: SquareTerminal,
+      icon: Activity,
       isActive: true,
       items: [
         {
-          title: "History",
-          url: "#",
+          title: "New Analysis",
+          url: "/",
         },
         {
-          title: "Starred",
-          url: "#",
-        },
-        {
-          title: "Settings",
-          url: "#",
+          title: "Past Analyses",
+          url: "/dashboard",
         },
       ],
     },
     {
-      title: "Models",
+      title: "Resources",
       url: "#",
-      icon: Bot,
+      icon: Users,
       items: [
         {
-          title: "Genesis",
-          url: "#",
+          title: "Resource Utilization",
+          url: "/resources",
         },
         {
-          title: "Explorer",
-          url: "#",
-        },
-        {
-          title: "Quantum",
-          url: "#",
+          title: "Team Performance",
+          url: "/team",
         },
       ],
     },
@@ -96,19 +82,15 @@ const data = {
       icon: BookOpen,
       items: [
         {
-          title: "Introduction",
+          title: "Getting Started",
           url: "#",
         },
         {
-          title: "Get Started",
+          title: "API Reference",
           url: "#",
         },
         {
-          title: "Tutorials",
-          url: "#",
-        },
-        {
-          title: "Changelog",
+          title: "Examples",
           url: "#",
         },
       ],
@@ -123,15 +105,11 @@ const data = {
           url: "#",
         },
         {
-          title: "Team",
+          title: "API Keys",
           url: "#",
         },
         {
-          title: "Billing",
-          url: "#",
-        },
-        {
-          title: "Limits",
+          title: "Notifications",
           url: "#",
         },
       ],
@@ -139,19 +117,19 @@ const data = {
   ],
   projects: [
     {
-      name: "Design Engineering",
+      name: "Customer Support",
       url: "#",
-      icon: Frame,
+      icon: HeadphonesIcon,
     },
     {
-      name: "Sales & Marketing",
+      name: "Sales Pipeline",
       url: "#",
-      icon: PieChart,
+      icon: LineChart,
     },
     {
-      name: "Travel",
+      name: "IT Operations",
       url: "#",
-      icon: Map,
+      icon: Network,
     },
   ],
 }
@@ -159,7 +137,7 @@ const data = {
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   return (
     <Sidebar collapsible="icon" {...props}>
-      <SidebarHeader>
+      <SidebarHeader className="pb-4">
         <TeamSwitcher teams={data.teams} />
       </SidebarHeader>
       <SidebarContent>
