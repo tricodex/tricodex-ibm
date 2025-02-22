@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect } from "react"
-import { AnimatedThoughts } from "@/components/ui/animated-thoughts"
+import { motion, AnimatePresence } from "framer-motion"
+import { ThoughtBubble } from '@/components/ui/ThoughtBubble'
 import {
   Bot,
   FileText,
@@ -16,6 +17,7 @@ import { ProcessPatterns } from "@/components/process/process-patterns"
 import { ResourceAnalysis } from "@/components/process/resource-analysis"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
+import type { AnalysisResult, ThoughtMessage } from "@/types/analysis"
 
 interface Improvement {
   action: string;
@@ -28,18 +30,6 @@ interface AnalysisResults {
   performance: any;
   patterns: any[];
   improvements: Improvement[];
-}
-
-interface AnalysisResult {
-  status: "processing" | "completed" | "failed";
-  progress: number;
-  thoughts: Array<{
-    timestamp: string;
-    stage: string;
-    thought: string;
-    progress: number;
-  }>;
-  results?: AnalysisResults;
 }
 
 interface AnalysisSectionProps {
@@ -117,12 +107,22 @@ export const AnalysisSection = ({
         </div>
       </div>
 
-      {/* Thoughts Stream with Enhanced Animation */}
+      {/* Replace AnimatedThoughts with new ThoughtBubble stream */}
       <div className="rounded-lg border bg-card p-6">
-        <AnimatedThoughts 
-          thoughts={analysisResult?.thoughts || []} 
-          isProcessing={isProcessing}
-        />
+        <h3 className="text-lg font-semibold mb-4">Analysis Progress</h3>
+        <div className="space-y-2 max-h-[400px] overflow-y-auto">
+          <AnimatePresence>
+            {analysisResult?.thoughts.map((thought, index) => (
+              <ThoughtBubble
+                key={thought.timestamp}
+                thought={thought.thought}
+                timestamp={thought.timestamp}
+                type="watson"
+                isActive={index === analysisResult.thoughts.length - 1}
+              />
+            ))}
+          </AnimatePresence>
+        </div>
       </div>
 
       {/* Results Section with Fade-In Animation */}

@@ -111,3 +111,61 @@ class ProcessLensAgent(BeeAgent):
         except Exception as e:
             logger.error(f"Failed to structure BI output: {e}")
             raise
+
+    async def analyze_tickets(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Analyze ticket data and generate insights"""
+        try:
+            prompt = f"""Analyze the following ticket system data and provide insights:
+
+            Metadata:
+            {data['metadata']}
+            
+            Metrics:
+            {data['metrics']}
+            
+            Patterns:
+            {data['patterns']}
+            
+            Data Quality:
+            {data['data_quality']}
+            
+            Provide a detailed analysis including:
+            1. Key insights about ticket distribution and patterns
+            2. Process bottlenecks and inefficiencies
+            3. Recommendations for improvement
+            4. Data quality issues and their impact
+            5. Language and regional considerations
+            
+            Format the response as structured JSON with sections.
+            """
+            
+            result = await self.run(run_input=BeeRunInput(prompt=prompt))
+            return self._validate_and_structure_insights(result)
+            
+        except Exception as e:
+            logger.error(f"Ticket analysis failed: {e}")
+            return {
+                "status": "error",
+                "error": str(e),
+                "recommendations": [
+                    "Ensure all required fields are present in the dataset",
+                    "Check data quality and completeness",
+                    "Consider adding more contextual information"
+                ]
+            }
+
+    def _validate_and_structure_insights(self, result: BeeRunOutput) -> Dict[str, Any]:
+        """Validate and structure ticket analysis insights"""
+        if not result or not result.output:
+            raise ValueError("Empty analysis result")
+            
+        # Ensure consistent output structure
+        structured = {
+            "insights": result.output.get("insights", []),
+            "bottlenecks": result.output.get("bottlenecks", []),
+            "recommendations": result.output.get("recommendations", []),
+            "data_quality_impact": result.output.get("data_quality_impact", {}),
+            "language_considerations": result.output.get("language_considerations", {})
+        }
+        
+        return structured
