@@ -24,6 +24,7 @@ export interface AnalysisResults {
 }
 
 export interface AnalysisResult {
+  taskId: string;
   status: "processing" | "completed" | "failed";
   progress: number;
   thoughts: ThoughtMessage[];

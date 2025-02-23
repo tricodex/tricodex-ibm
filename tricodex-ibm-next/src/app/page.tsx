@@ -34,7 +34,7 @@ import { saveAs } from 'file-saver'
 import { startAnalysis } from "@/lib/api"
 import { toast } from 'sonner'
 import { Toaster } from 'sonner'
-import { useAnalysisSocket } from "@/hooks/useAnalysisSocket"
+import { useProcessLensSocket } from "@/hooks/useProcessLensSocket"
 import { AnalysisSection } from "@/components/AnalysisSection"
 import { GeminiAnalysisSection } from "@/components/GeminiAnalysisSection"
 
@@ -42,15 +42,24 @@ export default function ProcessLensPage() {
   const [taskId, setTaskId] = useState<string | null>(null)
   const [activeSection, setActiveSection] = useState<string>("upload")
   
-  // Use the WebSocket hook
-  const { isConnected, error, thoughts, results, latestThought } = useAnalysisSocket(taskId, 'watson')
+  // Use the WebSocket hook with correct parameters
   const { 
-    isConnected: geminiConnected, 
+    status, 
+    error, 
+    thoughts, 
+    results, 
+    latestThought,
+    isConnected 
+  } = useProcessLensSocket({ taskId });
+  
+  const { 
+    status: geminiStatus,
     error: geminiError, 
     thoughts: geminiThoughts, 
     results: geminiResults,
-    latestThought: geminiLatestThought 
-  } = useAnalysisSocket(taskId, 'gemini')
+    latestThought: geminiLatestThought,
+    isConnected: geminiConnected
+  } = useProcessLensSocket({ taskId });
 
   const handleFileUpload = async (files: File[]) => {
     if (!files.length) return
@@ -155,16 +164,26 @@ export default function ProcessLensPage() {
             </div>
           ) : (
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-              {/* WatsonX Analysis */}
               <AnalysisSection
-                analysisResult={results}
+                analysisResult={results ? {
+                  taskId: taskId || '',  // Changed from task_id to taskId
+                  status: results ? 'completed' : 'processing',
+                  progress: latestThought?.progress || 0,
+                  thoughts: thoughts || [],
+                  results
+                } : null}
                 isPolling={isConnected}
                 onDownloadPDF={handleDownloadPDF}
               />
               
-              {/* Gemini Analysis */}
               <GeminiAnalysisSection
-                analysisResult={geminiResults}
+                analysisResult={geminiResults ? {
+                  taskId: taskId || '',  // Changed from task_id to taskId
+                  status: geminiResults ? 'completed' : 'processing',
+                  progress: geminiLatestThought?.progress || 0,
+                  thoughts: geminiThoughts || [],
+                  results: geminiResults
+                } : null}
                 isPolling={geminiConnected}
                 onDownloadPDF={handleDownloadPDF}
               />

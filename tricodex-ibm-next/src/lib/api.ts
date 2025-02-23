@@ -5,7 +5,7 @@ export const API_CONFIG = {
   endpoints: {
     health: "/health",
     analyze: "/analyze",
-    status: (taskId: string) => `/status/${taskId}`,
+    status: (taskId: string) => `/analyze/${taskId}`,  // Updated to match backend route
     files: {
       list: "/files",
       info: (fileId: string) => `/files/${fileId}`,

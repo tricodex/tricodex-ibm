@@ -7,7 +7,7 @@ export async function GET(
   { params }: { params: { taskId: string } }
 ) {
   try {
-    const response = await fetch(`${API_URL}/status/${params.taskId}`)
+    const response = await fetch(`${API_URL}/analyze/${params.taskId}`)
     const data = await response.json()
     return NextResponse.json(data)
   } catch (error) {
