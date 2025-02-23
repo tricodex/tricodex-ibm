@@ -1,0 +1,157 @@
+Example Test Data:
+Report for customer_support_tickets.csv:
+Number of rows: 8469
+Number of columns: 17
+Columns: Ticket ID, Customer Name, Customer Email, Customer Age, Customer Gender, Product Purchased, Date of Purchase, Ticket Type, Ticket Subject, Ticket Description, Ticket Status, Resolution, Ticket Priority, Ticket Channel, First Response Time, Time to Resolution, Customer Satisfaction Rating
+Data types:
+Ticket ID                         int64
+Customer Name                    object
+Customer Email                   object
+Customer Age                      int64
+Customer Gender                  object
+Product Purchased                object
+Date of Purchase                 object
+Ticket Type                      object
+Ticket Subject                   object
+Ticket Description               object
+Ticket Status                    object
+Resolution                       object
+Ticket Priority                  object
+Ticket Channel                   object
+First Response Time              object
+Time to Resolution               object
+Customer Satisfaction Rating    float64
+Summary statistics:
+         Ticket ID  Customer Age  Customer Satisfaction Rating
+count  8469.000000   8469.000000                   2769.000000
+mean   4235.000000     44.026804                      2.991333
+std    2444.934048     15.296112                      1.407016
+min       1.000000     18.000000                      1.000000
+25%    2118.000000     31.000000                      2.000000
+50%    4235.000000     44.000000                      3.000000
+75%    6352.000000     57.000000                      4.000000
+max    8469.000000     70.000000                      5.000000
+--------------------------------------------------------------------------------
+
+Report for helpdesk_customer_tickets.csv:
+Number of rows: 600
+Number of columns: 18
+Columns: id, subject, body, answer, type, queue, priority, language, business_type, tag_1, tag_2, tag_3, tag_4, tag_5, tag_6, tag_7, tag_8, tag_9
+Data types:
+id                 int64
+subject           object
+body              object
+answer            object
+type              object
+queue             object
+priority          object
+language          object
+business_type     object
+tag_1             object
+tag_2             object
+tag_3             object
+tag_4             object
+tag_5             object
+tag_6             object
+tag_7             object
+tag_8             object
+tag_9            float64
+Summary statistics:
+                 id  tag_9
+count    600.000000    0.0
+mean   44149.815000    NaN
+std    29353.039196    NaN
+min       36.000000    NaN
+25%    17807.250000    NaN
+50%    41571.500000    NaN
+75%    68183.750000    NaN
+max    99709.000000    NaN
+--------------------------------------------------------------------------------
+
+Report for all_tickets.csv:
+Number of rows: 48549
+Number of columns: 9
+Columns: title, body, ticket_type, category, sub_category1, sub_category2, business_service, urgency, impact
+Data types:
+title               object
+body                object
+ticket_type          int64
+category             int64
+sub_category1        int64
+sub_category2        int64
+business_service     int64
+urgency              int64
+impact               int64
+Summary statistics:
+        ticket_type      category  sub_category1  sub_category2  business_service       urgency        impact
+count  48549.000000  48549.000000   48549.000000   48549.000000      48549.000000  48549.000000  48549.000000
+mean       0.713115      4.491153      11.614390      32.004634         49.482605      2.506066      3.677460
+std        0.452312      1.103556      13.752707      33.602122         22.806100      0.855646      0.591513
+min        0.000000      0.000000       0.000000       0.000000          0.000000      0.000000      0.000000
+25%        0.000000      4.000000       2.000000       7.000000         32.000000      2.000000      3.000000
+50%        1.000000      4.000000       3.000000      21.000000         49.000000      3.000000      4.000000
+75%        1.000000      5.000000      21.000000      53.000000         67.000000      3.000000      4.000000
+max        1.000000     12.000000      58.000000     114.000000        102.000000      3.000000      4.000000
+--------------------------------------------------------------------------------
+
+Report for dataset-tickets-multi-lang-4-20k.csv:
+Number of rows: 20000
+Number of columns: 15
+Columns: subject, body, answer, type, queue, priority, language, tag_1, tag_2, tag_3, tag_4, tag_5, tag_6, tag_7, tag_8
+Data types:
+subject     object
+body        object
+answer      object
+type        object
+queue       object
+priority    object
+language    object
+tag_1       object
+tag_2       object
+tag_3       object
+tag_4       object
+tag_5       object
+tag_6       object
+tag_7       object
+tag_8       object
+Summary statistics:
+                                                     subject                                                                                                                                                                                                                                                          body                                                                                                                                                                                                                                    answer      type              queue priority language      tag_1        tag_2  tag_3         tag_4         tag_5       tag_6       tag_7          tag_8
+count                                                  18539                                                                                                                                                                                                                                                         19998                                                                                                                                                                                                                                     19996     20000              20000    20000    20000      20000        19954  19905         18461         13091        7351        3928           1907
+unique                                                 18539                                                                                                                                                                                                                                                         19998                                                                                                                                                                                                                                     19996         4                 10        3        2        148          204    344           481           578         566         492            386
+top     Unvorhergesehener Absturz der Datenanalyse-Plattform  Die Datenanalyse-Plattform brach unerwartet ab, da die Speicheroberfläche zu gering war. Ich habe versucht, Laravel 8 und meinen MacBook Pro neu zu starten, aber das Problem behält sich bei. Ich benötige Ihre Unterstützung, um diesen Fehler zu beheben.  Ich werde Ihnen bei der Lösung des Problems helfen, indem die Datenanalyse-Plattform neu gestartet wird. Bitte bereiten Sie spezifische Informationen zu Ihren Speichereinstellungen vor, damit wir die Ursache besser ermitteln können.  Incident  Technical Support   medium       en  Technical  Performance     IT  Tech Support  Tech Support  Resolution  Resolution  Documentation
+freq                                                       1                                                                                                                                                                                                                                                             1                                                                                                                                                                                                                                         1      7978               5824     8144    11923       5034         2795   3309          3436          2287         841         417            162
+--------------------------------------------------------------------------------
+
+Report for dataset-tickets-multi-lang3-4k.csv:
+Number of rows: 4000
+Number of columns: 17
+Columns: subject, body, answer, type, queue, priority, language, business_type, tag_1, tag_2, tag_3, tag_4, tag_5, tag_6, tag_7, tag_8, tag_9
+Data types:
+subject           object
+body              object
+answer            object
+type              object
+queue             object
+priority          object
+language          object
+business_type     object
+tag_1             object
+tag_2             object
+tag_3             object
+tag_4             object
+tag_5             object
+tag_6             object
+tag_7             object
+tag_8             object
+tag_9            float64
+Summary statistics:
+       tag_9
+count    0.0
+mean     NaN
+std      NaN
+min      NaN
+25%      NaN
+50%      NaN
+75%      NaN
+max      NaN
+--------------------------------------------------------------------------------

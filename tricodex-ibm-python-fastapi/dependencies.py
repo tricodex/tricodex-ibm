@@ -64,17 +64,22 @@ async def get_analysis_pipeline() -> EnhancedAnalysisPipeline:
         # Get pre-initialized agents
         watson_agent = AgentFactory.get_agent("watson")
         gemini_agent = AgentFactory.get_agent("gemini")
+        function_agent = AgentFactory.get_agent("function")
         
-        if not watson_agent or not gemini_agent:
+        if not watson_agent or not gemini_agent or not function_agent:
             logger.error("Required agents not initialized")
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Analysis service not ready - agents not initialized"
             )
             
+        # Initialize pipeline with agents dictionary
         pipeline = EnhancedAnalysisPipeline(
-            watson_agent=watson_agent,
-            gemini_agent=gemini_agent
+            agents={
+                "watson": watson_agent,
+                "gemini": gemini_agent,
+                "function": function_agent
+            }
         )
         return pipeline
         

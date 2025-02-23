@@ -8,6 +8,9 @@ import traceback
 import logging
 import json
 from datetime import datetime
+import pandas as pd
+import io
+import csv
 
 logger = logging.getLogger(__name__)
 
@@ -122,3 +125,97 @@ def sanitize_data(data: Dict[str, Any]) -> Dict[str, Any]:
             return str(value)
             
     return {str(k): _sanitize_value(v) for k, v in data.items()}
+
+def validate_file_content(content: bytes, filename: str) -> None:
+    """
+    Validate file content for analysis
+    
+    Args:
+        content: Raw file content bytes
+        filename: Original filename for type detection
+    
+    Raises:
+        ValidationError: If file content is invalid
+    """
+    if not content:
+        raise ValidationError("Empty file content")
+        
+    # Determine file type from extension
+    ext = filename.lower().split('.')[-1] if '.' in filename else ''
+    
+    try:
+        if ext == 'csv':
+            # Try parsing as CSV
+            try:
+                pd.read_csv(io.BytesIO(content), nrows=5)
+            except Exception as e:
+                raise ValidationError(
+                    "Invalid CSV format",
+                    {"error": str(e)}
+                )
+                
+            # Validate CSV structure
+            csv_reader = csv.reader(io.StringIO(content.decode('utf-8')))
+            headers = next(csv_reader, None)
+            if not headers:
+                raise ValidationError("CSV file must have headers")
+                
+            # Check for minimum required columns for analysis
+            min_cols = 2  # At least 2 columns needed for meaningful analysis
+            if len(headers) < min_cols:
+                raise ValidationError(
+                    f"CSV must have at least {min_cols} columns",
+                    {"found": len(headers)}
+                )
+                
+        elif ext in ['xls', 'xlsx']:
+            # Try parsing as Excel
+            try:
+                pd.read_excel(io.BytesIO(content), nrows=5)
+            except Exception as e:
+                raise ValidationError(
+                    "Invalid Excel format",
+                    {"error": str(e)}
+                )
+                
+        elif ext == 'json':
+            # Try parsing as JSON
+            try:
+                data = json.loads(content)
+                if not isinstance(data, (list, dict)):
+                    raise ValidationError(
+                        "JSON content must be an array or object"
+                    )
+            except json.JSONDecodeError as e:
+                raise ValidationError(
+                    "Invalid JSON format",
+                    {"error": str(e)}
+                )
+                
+        else:
+            raise ValidationError(
+                f"Unsupported file type: {ext}",
+                {"supported": ['csv', 'xls', 'xlsx', 'json']}
+            )
+            
+        # Size validation (100MB limit)
+        max_size = 100 * 1024 * 1024  # 100MB
+        if len(content) > max_size:
+            raise ValidationError(
+                "File too large",
+                {
+                    "max_size_mb": max_size // (1024 * 1024),
+                    "file_size_mb": len(content) // (1024 * 1024)
+                }
+            )
+            
+    except UnicodeDecodeError:
+        raise ValidationError("File must be UTF-8 encoded")
+    except Exception as e:
+        if not isinstance(e, ValidationError):
+            logger.error(f"Unexpected validation error: {e}")
+            raise ValidationError(
+                "File validation failed",
+                {"error": str(e)}
+            )
+        raise

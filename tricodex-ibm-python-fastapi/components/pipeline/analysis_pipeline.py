@@ -1,221 +1,394 @@
 """
-Core pipeline with caching and parallel processing optimizations
+Analysis pipeline for processing data through multiple agents with enhanced caching
 """
-import asyncio
-import logging
 from typing import Dict, Any, List, Optional
+import logging
+from ..agents.base_agent import BaseAgent
+import asyncio
 import pandas as pd
-from datetime import datetime, timedelta
-from utils.helpers import async_retry, ProcessLensError  # Changed from relative to absolute import
-from .analysis import Analysis
-from ..agents.processlens_agent import ProcessLensAgent
-from ..agents.gemini_agent import GeminiAgent
-from ..data_processing.ticket_processor import TicketProcessor
+from datetime import datetime
+import json
+from functools import lru_cache
 
 logger = logging.getLogger(__name__)
 
 class AnalysisCache:
     """Cache for analysis results"""
-    def __init__(self, ttl_minutes: int = 30):
-        self.cache: Dict[str, Dict[str, Any]] = {}
-        self.ttl = timedelta(minutes=ttl_minutes)
-    
+    def __init__(self, max_size: int = 100):
+        self.cache = {}
+        self.max_size = max_size
+        
     def get(self, key: str) -> Optional[Dict[str, Any]]:
-        """Get cached result if not expired"""
-        if key in self.cache:
-            entry = self.cache[key]
-            if datetime.now() - entry["timestamp"] < self.ttl:
-                return entry["data"]
-            del self.cache[key]
-        return None
-    
-    def set(self, key: str, data: Dict[str, Any]) -> None:
-        """Cache analysis result"""
-        self.cache[key] = {
-            "data": data,
-            "timestamp": datetime.now()
-        }
-    
-    def invalidate(self, key: str) -> None:
-        """Invalidate cache entry"""
-        if key in self.cache:
-            del self.cache[key]
+        return self.cache.get(key)
+        
+    def set(self, key: str, value: Dict[str, Any]) -> None:
+        if len(self.cache) >= self.max_size:
+            # Remove oldest entry
+            oldest_key = next(iter(self.cache))
+            del self.cache[oldest_key]
+        self.cache[key] = value
 
 class EnhancedAnalysisPipeline:
-    """Enhanced analysis pipeline with caching and parallel processing"""
+    """Enhanced pipeline for coordinating multiple analysis agents with caching"""
     
-    def __init__(self, 
-                watson_agent: Optional[ProcessLensAgent] = None, 
-                gemini_agent: Optional[GeminiAgent] = None,
-                cache_ttl: int = 30):
-        self.watson_agent = watson_agent
-        self.gemini_agent = gemini_agent
-        self.processor = TicketProcessor()
-        self.cache = AnalysisCache(ttl_minutes=cache_ttl)
-        self.progress = 0
+    def __init__(self, agents: Dict[str, BaseAgent]):
+        self.agents = agents
+        self._progress = 0
+        self._thoughts = []
+        self._results = {}
+        self._active_agent = None
+        self.MAX_TOTAL_API_CALLS = 5
+        self.cache = AnalysisCache()
+        self._validate_agents()
+        logger.info("Analysis pipeline initialized with agents: %s", list(agents.keys()))
 
-    @async_retry(retries=3, delay=1.0)
-    async def analyze_dataset(self, 
-                            df: pd.DataFrame,
-                            cache_key: Optional[str] = None) -> Dict[str, Any]:
-        """Run enhanced analysis pipeline"""
+    def _validate_agents(self) -> None:
+        """Validate required agents are present"""
+        required_agents = {"watson", "gemini", "function"}
+        missing = required_agents - set(self.agents.keys())
+        if missing:
+            raise ValueError(f"Missing required agents: {missing}")
+
+    def _add_thought(self, thought: str) -> None:
+        """Add thought with timestamp"""
+        self._thoughts.append({
+            "thought": thought,
+            "timestamp": datetime.now().isoformat(),
+            "agent": self._active_agent or "pipeline"
+        })
+
+    async def execute(self, data: pd.DataFrame) -> Dict[str, Any]:
+        """Execute analysis pipeline with API call limiting and caching"""
         try:
-            logger.info(f"Starting analysis pipeline for dataset shape: {df.shape}")
+            # Generate cache key from data characteristics
+            cache_key = self._generate_cache_key(data)
+            cached_result = self.cache.get(cache_key)
             
-            # Validate agents are initialized
-            if not self.watson_agent or not self.gemini_agent:
-                raise ProcessLensError("Analysis agents not properly initialized")
+            if cached_result:
+                logger.info("Using cached analysis results")
+                self._add_thought("Retrieved cached analysis results")
+                return cached_result
             
-            # Check cache first
-            if cache_key:
-                cached = self.cache.get(cache_key)
-                if cached:
-                    logger.info(f"Using cached results for {cache_key}")
-                    return cached
+            logger.info(f"Starting analysis pipeline for dataset shape: {data.shape}")
+            self._add_thought(f"Starting analysis of dataset with {len(data)} records")
             
-            # Initial data validation
-            if df.empty:
-                raise ProcessLensError("Empty dataset provided for analysis")
-            
-            # Process data with progress tracking
-            processed_data = await self._process_with_progress(df)
-            self._update_progress(30)
+            # Initial data preprocessing
+            processed_data = self._preprocess_data(data)
+            self._progress = 30
+            self._add_thought("Data preprocessing complete")
             logger.info("Data preprocessing complete")
             
-            # Run parallel analysis with enhanced error handling
-            try:
-                results = await self._run_parallel_analysis(processed_data)
-                self._update_progress(60)
-                logger.info("Parallel analysis complete")
-            except Exception as e:
-                logger.error(f"Parallel analysis failed: {e}", exc_info=True)
-                raise ProcessLensError(f"Analysis execution failed: {str(e)}")
+            # Prepare batched analysis payload
+            analysis_input = self._prepare_analysis_input(processed_data)
             
-            # Synthesize and cache results
-            try:
-                synthesized = await self._synthesize_insights(
-                    processed_data=processed_data,
-                    **results
-                )
-                logger.info("Insights synthesis complete")
-            except Exception as e:
-                logger.error(f"Synthesis failed: {e}", exc_info=True)
-                raise ProcessLensError(f"Failed to synthesize insights: {str(e)}")
+            # Execute agents in sequence with strict API limits
+            api_call_count = 0
+            for agent_name, agent in self.agents.items():
+                if api_call_count >= self.MAX_TOTAL_API_CALLS:
+                    logger.warning(f"Maximum total API calls ({self.MAX_TOTAL_API_CALLS}) reached")
+                    break
+                    
+                try:
+                    self._active_agent = agent_name
+                    agent_progress_start = 30 + (70 * (list(self.agents.keys()).index(agent_name) / len(self.agents)))
+                    
+                    self._add_thought(f"Starting {agent_name} analysis")
+                    agent_result = await agent.analyze(analysis_input)
+                    
+                    # Track API calls
+                    api_call_count += getattr(agent, '_api_calls', 1)
+                    
+                    # Store results
+                    if agent_result and not isinstance(agent_result.get('error'), str):
+                        self._results[agent_name] = agent_result
+                    
+                    # Update progress
+                    self._progress = min(95, int(agent_progress_start + (70/len(self.agents))))
+                    
+                except Exception as e:
+                    logger.error(f"Agent {agent_name} failed: {e}")
+                    self._add_thought(f"Error in {agent_name} analysis: {str(e)}")
+                    continue
+                    
+            # Final processing
+            self._progress = 100
+            aggregated_results = self._aggregate_results()
             
-            final_results = {
-                "status": "success",
-                "processed_data": processed_data,
-                "watson_analysis": results["watson_results"],
-                "gemini_analysis": results["gemini_results"],
-                "synthesized_insights": synthesized,
-                "timestamp": datetime.utcnow().isoformat()
+            # Cache the results
+            result = {
+                "status": "completed",
+                "results": aggregated_results,
+                "thoughts": self._thoughts,
+                "progress": self._progress,
+                "error": None
             }
+            self.cache.set(cache_key, result)
             
-            # Cache results if key provided
-            if cache_key:
-                self.cache.set(cache_key, final_results)
-                logger.info(f"Results cached for key: {cache_key}")
-            
-            self._update_progress(100)
-            return final_results
+            return result
             
         except Exception as e:
-            logger.error(f"Pipeline failed: {e}", exc_info=True)
-            if cache_key:
-                self.cache.invalidate(cache_key)
-            raise ProcessLensError(f"Analysis pipeline failed: {str(e)}")
+            logger.error(f"Analysis execution failed: {e}")
+            return {
+                "status": "error",
+                "error": str(e),
+                "thoughts": self._thoughts,
+                "progress": self._progress,
+                "results": self._results
+            }
 
-    async def _process_with_progress(self, df: pd.DataFrame) -> Dict[str, Any]:
-        """Process data with progress tracking"""
+    def _generate_cache_key(self, data: pd.DataFrame) -> str:
+        """Generate a cache key based on data characteristics"""
+        characteristics = {
+            "shape": data.shape,
+            "columns": list(data.columns),
+            "dtypes": str(data.dtypes),
+            "head_hash": hash(str(data.head())),
+            "timestamp": datetime.now().strftime("%Y%m%d")
+        }
+        return hash(json.dumps(characteristics, sort_keys=True))
+
+    def _preprocess_data(self, data: pd.DataFrame) -> pd.DataFrame:
+        """Preprocess data before analysis"""
+        # Basic preprocessing
+        data = data.copy()
+        
+        # Handle missing values
+        numeric_cols = data.select_dtypes(include=['int64', 'float64']).columns
+        data[numeric_cols] = data[numeric_cols].fillna(0)
+        data = data.fillna('')
+        
+        return data
+
+    def _prepare_analysis_input(self, data: pd.DataFrame) -> Dict[str, Any]:
+        """Prepare data structure for analysis agents"""
         try:
-            return self.processor.process_dataset(df)
-        except Exception as e:
-            logger.error(f"Data processing failed: {e}")
-            raise ProcessLensError(f"Data processing failed: {str(e)}")
+            # Calculate basic metrics
+            metrics = {
+                "row_count": len(data),
+                "column_count": len(data.columns),
+                "missing_values": data.isnull().sum().to_dict(),
+                "numeric_summary": self._get_numeric_summary(data),
+                "categorical_summary": self._get_categorical_summary(data),
+                "completeness": self._calculate_completeness(data)
+            }
 
-    async def _run_parallel_analysis(self, processed_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Run analysis tasks in parallel with error handling"""
-        watson_task = self.watson_agent.analyze(processed_data)
-        gemini_task = self.gemini_agent.analyze(processed_data)
-        
-        results = await asyncio.gather(
-            watson_task, 
-            gemini_task,
-            return_exceptions=True
-        )
-        
-        # Handle potential errors from either agent
-        watson_results = (
-            results[0] if not isinstance(results[0], Exception)
-            else {"status": "error", "error": str(results[0])}
-        )
-        
-        gemini_results = (
-            results[1] if not isinstance(results[1], Exception)
-            else {"status": "error", "error": str(results[1])}
-        )
-        
+            # Extract metadata
+            metadata = {
+                "shape": data.shape,
+                "columns": list(data.columns),
+                "dtypes": {str(col): str(dtype) for col, dtype in data.dtypes.items()},
+                "timestamp": datetime.now().isoformat()
+            }
+
+            # Generate patterns
+            patterns = self._extract_patterns(data)
+
+            # Add thought markers for transparency
+            self._add_thought("Calculated basic metrics")
+            self._add_thought("Extracted metadata")
+            self._add_thought("Generated data patterns")
+
+            return {
+                "data": data.head(1000).to_dict('records'),  # Sample for initial analysis
+                "metadata": metadata,
+                "metrics": metrics,
+                "patterns": patterns
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to prepare analysis input: {e}")
+            self._add_thought(f"Error preparing analysis input: {str(e)}")
+            raise
+
+    def _get_numeric_summary(self, data: pd.DataFrame) -> Dict[str, Any]:
+        """Get summary of numeric columns"""
+        numeric_data = data.select_dtypes(include=['int64', 'float64'])
+        if numeric_data.empty:
+            return {}
+            
+        summary = numeric_data.describe()
         return {
-            "watson_results": watson_results,
-            "gemini_results": gemini_results
+            col: {
+                "mean": summary[col]["mean"],
+                "std": summary[col]["std"],
+                "min": summary[col]["min"],
+                "max": summary[col]["max"],
+                "quartiles": [
+                    summary[col]["25%"],
+                    summary[col]["50%"],
+                    summary[col]["75%"]
+                ]
+            }
+            for col in numeric_data.columns
         }
 
-    def _update_progress(self, progress: int) -> None:
-        """Update analysis progress"""
-        self.progress = progress
-        logger.info(f"Analysis progress: {progress}%")
+    def _get_categorical_summary(self, data: pd.DataFrame) -> Dict[str, Any]:
+        """Get summary of categorical columns"""
+        categorical_data = data.select_dtypes(include=['object'])
+        if categorical_data.empty:
+            return {}
+            
+        return {
+            col: {
+                "unique_values": categorical_data[col].nunique(),
+                "top_values": categorical_data[col].value_counts().head(5).to_dict()
+            }
+            for col in categorical_data.columns
+        }
 
-    async def _synthesize_insights(
-        self,
-        processed_data: Dict[str, Any],
-        watson_results: Dict[str, Any],
-        gemini_results: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Synthesize insights from both models"""
+    def _calculate_completeness(self, data: pd.DataFrame) -> Dict[str, float]:
+        """Calculate data completeness by column"""
+        return {
+            col: (1 - (data[col].isna().sum() / len(data))) * 100
+            for col in data.columns
+        }
+
+    def _extract_patterns(self, data: pd.DataFrame) -> List[Dict[str, Any]]:
+        """Extract basic patterns from data"""
+        patterns = []
+        
+        # Detect value patterns
+        numeric_cols = data.select_dtypes(include=['int64', 'float64']).columns
+        for col in numeric_cols:
+            if data[col].nunique() == 1:
+                patterns.append({
+                    "type": "constant",
+                    "column": col,
+                    "value": data[col].iloc[0]
+                })
+            elif data[col].nunique() == 2:
+                patterns.append({
+                    "type": "binary",
+                    "column": col,
+                    "values": data[col].unique().tolist()
+                })
+        
+        return patterns
+
+    def _aggregate_results(self) -> Dict[str, Any]:
+        """Aggregate results from all agents"""
+        aggregated = {
+            "summary": {},
+            "insights": [],
+            "recommendations": []
+        }
+        
+        for agent_name, results in self._results.items():
+            # Extract insights
+            if "insights" in results:
+                aggregated["insights"].extend(
+                    [{"agent": agent_name, **insight} 
+                     for insight in results["insights"]]
+                )
+            
+            # Extract recommendations
+            if "recommendations" in results:
+                aggregated["recommendations"].extend(
+                    [{"agent": agent_name, **rec} 
+                     for rec in results["recommendations"]]
+                )
+            
+            # Merge metrics
+            if "metrics" in results:
+                aggregated["summary"][agent_name] = results["metrics"]
+        
+        return aggregated
+
+    async def analyze_dataset(self, df: pd.DataFrame, session_id: str) -> Dict[str, Any]:
+        """
+        Analyze dataset using multiple agents in parallel
+        
+        Args:
+            df: DataFrame to analyze
+            session_id: Unique session identifier
+            
+        Returns:
+            Combined analysis results from all agents
+        """
         try:
-            # Extract key metrics and insights
-            insights = {
-                "key_findings": self._merge_unique_insights(
-                    watson_results.get("insights", []),
-                    gemini_results.get("insights", [])
-                ),
-                "recommendations": self._merge_unique_insights(
-                    watson_results.get("recommendations", []),
-                    gemini_results.get("recommendations", [])
-                ),
+            logger.info(f"Starting analysis for session {session_id} with shape {df.shape}")
+            start_time = datetime.now()
+            
+            # Prepare common analysis context
+            context = {
+                "session_id": session_id,
+                "timestamp": start_time.isoformat(),
+                "data_shape": df.shape,
+                "columns": list(df.columns),
+                "dtypes": df.dtypes.to_dict(),
                 "metrics": {
-                    **watson_results.get("metrics", {}),
-                    **gemini_results.get("metrics", {}),
-                    "data_quality": processed_data.get("data_quality", {})
+                    "row_count": len(df),
+                    "column_count": len(df.columns),
+                    "missing_values": df.isnull().sum().to_dict()
                 }
             }
             
-            # Add language-specific insights if available
-            if "language_insights" in gemini_results:
-                insights["language_analysis"] = gemini_results["language_insights"]
+            # Run initial data quality analysis using function agent
+            data_quality = await self.agents["function"].analyze({
+                "task": "data_quality",
+                "data": df.head(1000).to_dict(),  # Sample for initial analysis
+                "context": context
+            })
             
-            return insights
+            # Run parallel analysis with Watson and Gemini
+            watson_task = self.agents["watson"].analyze({
+                "data": df.to_dict(),
+                "context": {**context, "data_quality": data_quality}
+            })
+            
+            gemini_task = self.agents["gemini"].analyze({
+                "data": df.to_dict(),
+                "context": {**context, "data_quality": data_quality}
+            })
+            
+            # Wait for both analyses to complete
+            watson_results, gemini_results = await asyncio.gather(
+                watson_task, gemini_task,
+                return_exceptions=True
+            )
+            
+            # Handle any errors from individual agents
+            for agent_name, result in [("watson", watson_results), ("gemini", gemini_results)]:
+                if isinstance(result, Exception):
+                    logger.error(f"{agent_name} analysis failed: {result}")
+                    result = {
+                        "status": "error",
+                        "error": str(result),
+                        "timestamp": datetime.now().isoformat()
+                    }
+            
+            # Combine and synthesize results
+            synthesis = await self.agents["function"].analyze({
+                "task": "synthesize_results",
+                "watson_results": watson_results,
+                "gemini_results": gemini_results,
+                "data_quality": data_quality,
+                "context": context
+            })
+            
+            processing_time = (datetime.now() - start_time).total_seconds()
+            
+            return {
+                "status": "success",
+                "session_id": session_id,
+                "timestamp": datetime.now().isoformat(),
+                "processing_time": processing_time,
+                "data_quality": data_quality,
+                "watson_analysis": watson_results,
+                "gemini_analysis": gemini_results,
+                "synthesis": synthesis,
+                "metrics": {
+                    **context["metrics"],
+                    "processing_time": processing_time
+                }
+            }
             
         except Exception as e:
-            logger.error(f"Failed to synthesize insights: {e}")
+            logger.error(f"Analysis pipeline failed: {e}", exc_info=True)
             return {
-                "error": "Failed to synthesize insights",
-                "partial_insights": {
-                    "watson": watson_results.get("insights", []),
-                    "gemini": gemini_results.get("insights", [])
-                }
+                "status": "error",
+                "error": str(e),
+                "session_id": session_id,
+                "timestamp": datetime.now().isoformat(),
+                "processing_time": (datetime.now() - start_time).total_seconds()
             }
-
-    @staticmethod
-    def _merge_unique_insights(list1: List[str], list2: List[str]) -> List[str]:
-        """Merge two lists of insights, removing duplicates while preserving order"""
-        seen = set()
-        merged = []
-        
-        for item in list1 + list2:
-            item_lower = item.lower()
-            if item_lower not in seen:
-                seen.add(item_lower)
-                merged.append(item)
-        
-        return merged

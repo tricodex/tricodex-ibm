@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState } from "react"
 import { AppSidebar } from "@/components/app-sidebar"
 import {
   Breadcrumb,
@@ -17,62 +17,40 @@ import {
 } from "@/components/ui/sidebar"
 import { FileUpload } from "@/components/ui/file-upload"
 import { Button } from "@/components/ui/button"
-import { 
-  Bot,
-  FileText,
-  TimerIcon,
-  Activity,
-  Users,
-  Download,
-} from "lucide-react"
-import { ProcessMetrics } from "@/components/process/process-metrics"
-import { ProcessPatterns } from "@/components/process/process-patterns"
-import { ResourceAnalysis } from "@/components/process/resource-analysis"
+import { Download } from "lucide-react"
 import { AnalysisPDF } from "@/components/process/analysis-pdf"
 import { pdf } from '@react-pdf/renderer'
 import { saveAs } from 'file-saver'
-import { startAnalysis } from "@/lib/api"
+import { api } from "@/lib/api"
 import { toast } from 'sonner'
 import { Toaster } from 'sonner'
 import { useProcessLensSocket } from "@/hooks/useProcessLensSocket"
-import { AnalysisSection } from "@/components/AnalysisSection"
-import { GeminiAnalysisSection } from "@/components/GeminiAnalysisSection"
+import { UnifiedAnalysisSection } from "@/components/UnifiedAnalysisSection"
 
 export default function ProcessLensPage() {
   const [taskId, setTaskId] = useState<string | null>(null)
   const [activeSection, setActiveSection] = useState<string>("upload")
   
-  // Use the WebSocket hook with correct parameters
   const { 
     status, 
     error, 
-    thoughts, 
-    results, 
+    thoughts = [], 
+    results,
     latestThought,
     isConnected 
-  } = useProcessLensSocket({ taskId });
-  
-  const { 
-    status: geminiStatus,
-    error: geminiError, 
-    thoughts: geminiThoughts, 
-    results: geminiResults,
-    latestThought: geminiLatestThought,
-    isConnected: geminiConnected
   } = useProcessLensSocket({ taskId });
 
   const handleFileUpload = async (files: File[]) => {
     if (!files.length) return
 
-    setActiveSection("analysis") // Update UI immediately to show analysis view
+    setActiveSection("analysis")
 
-    const formData = new FormData()
-    formData.append("file", files[0])
-    formData.append("project_name", "Process Analysis " + new Date().toLocaleDateString())
+    const file = files[0]
+    const projectName = "Process Analysis " + new Date().toLocaleDateString()
 
     try {
       await toast.promise(
-        startAnalysis(formData).then(data => {
+        api.startAnalysis(file, projectName).then(data => {
           setTaskId(data.task_id)
           return data
         }),
@@ -81,7 +59,7 @@ export default function ProcessLensPage() {
           success: (data) => `Analysis started successfully - Task ID: ${data.task_id}`,
           error: (err) => {
             console.error("Upload error:", err)
-            setActiveSection("upload") // Reset on error
+            setActiveSection("upload")
             return err.message || 'Failed to start analysis'
           }
         }
@@ -98,12 +76,13 @@ export default function ProcessLensPage() {
     
     try {
       await toast.promise(
-        pdf(<AnalysisPDF data={{ 
-          thoughts, 
-          results,
+        pdf(<AnalysisPDF data={{
+          taskId: taskId || '',
           status: results ? 'completed' : 'processing',
           progress: results ? 100 : latestThought?.progress || 0,
-          task_id: taskId || ''
+          thoughts: thoughts,
+          results: results,
+          error: error
         }} />).toBlob().then(blob => {
           saveAs(blob, `process-analysis-${new Date().toISOString()}.pdf`)
         }),
@@ -118,13 +97,6 @@ export default function ProcessLensPage() {
       toast.error('Failed to generate PDF')
     }
   }
-
-  // Display error toast when WebSocket error occurs
-  useEffect(() => {
-    if (error) {
-      toast.error(error)
-    }
-  }, [error])
 
   return (
     <SidebarProvider>
@@ -164,33 +136,37 @@ export default function ProcessLensPage() {
             </div>
           ) : (
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-              <AnalysisSection
+              <UnifiedAnalysisSection
                 analysisResult={results ? {
-                  taskId: taskId || '',  // Changed from task_id to taskId
+                  taskId: taskId || '',
                   status: results ? 'completed' : 'processing',
                   progress: latestThought?.progress || 0,
-                  thoughts: thoughts || [],
-                  results
+                  thoughts: thoughts,
+                  results: results,
+                  error: error
                 } : null}
                 isPolling={isConnected}
                 onDownloadPDF={handleDownloadPDF}
+                type="watson"
               />
               
-              <GeminiAnalysisSection
-                analysisResult={geminiResults ? {
-                  taskId: taskId || '',  // Changed from task_id to taskId
-                  status: geminiResults ? 'completed' : 'processing',
-                  progress: geminiLatestThought?.progress || 0,
-                  thoughts: geminiThoughts || [],
-                  results: geminiResults
+              <UnifiedAnalysisSection
+                analysisResult={results ? {
+                  taskId: taskId || '',
+                  status: results ? 'completed' : 'processing',
+                  progress: latestThought?.progress || 0,
+                  thoughts: thoughts,
+                  results: results,
+                  error: error
                 } : null}
-                isPolling={geminiConnected}
+                isPolling={isConnected}
                 onDownloadPDF={handleDownloadPDF}
+                type="gemini"
               />
             </div>
           )}
         </main>
       </SidebarInset>
     </SidebarProvider>
-  )
+  );
 }

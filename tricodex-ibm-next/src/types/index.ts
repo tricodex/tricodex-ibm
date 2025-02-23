@@ -1,46 +1,73 @@
-export type ProcessMetric = {
-  value: number
-  label: string
-  unit: string
+// Shared message types
+export interface ThoughtMessage {
+  timestamp: string;
+  stage?: string;
+  thought: string;
+  progress: number;
 }
 
-export type ProcessPattern = {
-  name: string
-  frequency: number
-  performance_metrics: {
-    avg_duration?: number
-    business_impact?: number
-  }
+// Core metric and analysis types
+export interface ProcessMetric {
+  value: number;
+  label: string;
+  unit: string;
 }
 
-export type ProcessImprovement = {
-  action: string
-  expected_impact: number
-  implementation_complexity: number
-  suggestion: string
+export interface ProcessPattern {
+  name: string;
+  frequency: number;
+  description?: string;
+  type?: string;
+  confidence?: number;
+  performance_metrics?: {
+    avg_duration?: number;
+    business_impact?: number;
+  };
 }
 
-export type ThoughtMessage = {
-  timestamp: string
-  stage: string
-  thought: string
-  progress: number
+export interface ProcessImprovement {
+  action: string;
+  expected_impact: number;
+  implementation_complexity: number;
+  suggestion: string;
 }
 
-export type AnalysisResult = {
-  task_id: string
-  status: "processing" | "completed" | "failed"
-  progress: number
-  thoughts: ThoughtMessage[]
-  results?: {
-    structure: Record<string, any>
-    patterns: ProcessPattern[]
-    performance: {
-      timing: Record<string, number>
-      quality: Record<string, number>
-      resources: Record<string, any>
-    }
-    improvements: ProcessImprovement[]
-    synthesis: Record<string, any>
-  }
+// Analysis result types
+export interface AnalysisSynthesis {
+  insights: string[];
+  recommendations: string[];
+  metrics: Record<string, ProcessMetric>;
+}
+
+export interface AnalysisPerformance {
+  timing: Record<string, number>;
+  quality: Record<string, number>;
+  resources: Record<string, any>;
+}
+
+export interface AnalysisResults {
+  structure: Record<string, any>;
+  patterns: ProcessPattern[];
+  performance: AnalysisPerformance;
+  improvements: ProcessImprovement[];
+  synthesis: AnalysisSynthesis;
+  data_quality: Record<string, any>;
+  language_considerations?: Record<string, any>;
+}
+
+export interface AnalysisResult {
+  taskId: string;
+  status: "processing" | "completed" | "failed";
+  progress: number;
+  thoughts: ThoughtMessage[];
+  results?: AnalysisResults;
+  error?: string;
+}
+
+// Component prop types
+export interface AnalysisSectionProps {
+  analysisResult: AnalysisResult | null;
+  isPolling: boolean;
+  onDownloadPDF: () => void;
+  type?: 'watson' | 'gemini';
 }

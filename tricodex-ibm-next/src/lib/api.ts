@@ -1,233 +1,115 @@
-// src/lib/api.ts
+/**
+ * API utilities
+ */
 
-export const API_CONFIG = {
-  baseUrl: process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000",
-  endpoints: {
-    health: "/health",
-    analyze: "/analyze",
-    status: (taskId: string) => `/analyze/${taskId}`,  // Updated to match backend route
-    files: {
-      list: "/files",
-      info: (fileId: string) => `/files/${fileId}`,
-      delete: (fileId: string) => `/files/${fileId}`,
-    },
-    admin: {
-      cleanup: "/admin/cleanup",
-    }
-  }
+export interface AnalysisResponse {
+  task_id: string;
+  message: string;
+  status: string;
 }
 
-// API client functions
-export async function startAnalysis(formData: FormData) {
-  console.log("Starting analysis with API URL:", API_CONFIG.baseUrl);
+export interface APIError {
+  message: string;
+  details?: string;
+  status?: number;
+}
+
+/**
+ * API utilities for interacting with the ProcessLens backend
+ */
+class APIClient {
+  private readonly baseUrl: string;
+
+  constructor() {
+    this.baseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+  }
   
-  try {
-    const response = await fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.analyze}`, {
-      method: "POST",
-      body: formData,
-    });
-
-    const responseData = await response.text();
-    let errorDetail;
-
+  async startAnalysis(file: File, projectName?: string): Promise<AnalysisResponse> {
+    const formData = new FormData();
+    formData.append('file', file);
+    if (projectName) {
+      formData.append('project_name', projectName);
+    }
+    
     try {
-      // Try to parse as JSON
-      const jsonData = JSON.parse(responseData);
-      errorDetail = jsonData.detail || responseData;
-    } catch {
-      // If not JSON, use raw response
-      errorDetail = responseData;
-    }
+      // Validate file before sending
+      if (!file.size) {
+        throw new Error('Empty file provided');
+      }
 
-    if (!response.ok) {
-      console.error("Analysis API error:", {
-        status: response.status,
-        statusText: response.statusText,
-        error: errorDetail
+      console.log(`Starting analysis for file ${file.name} at ${this.baseUrl}/analyze`);
+      
+      const response = await fetch(`${this.baseUrl}/analyze`, {
+        method: 'POST',
+        body: formData,
+        headers: {
+          'Accept': 'application/json',
+        },
       });
-      throw new Error(`API error (${response.status}): ${errorDetail}`);
+
+      const responseData = await response.text();
+      let parsed;
+      
+      try {
+        parsed = JSON.parse(responseData);
+      } catch (e) {
+        console.error('Failed to parse response:', responseData);
+        throw new Error('Invalid response format from server');
+      }
+
+      if (!response.ok) {
+        // Handle structured error response
+        const error: APIError = {
+          message: parsed.error || 'Unknown error occurred',
+          details: parsed.details,
+          status: response.status
+        };
+        throw error;
+      }
+
+      return parsed;
+    } catch (error) {
+      console.error('Analysis request failed:', error);
+      
+      // Format error for consistent handling
+      const apiError: APIError = {
+        message: error instanceof Error ? error.message : 'Unknown error occurred',
+        details: error instanceof Error ? error.stack : undefined,
+        status: (error && typeof error === 'object' && 'status' in error && typeof error.status === 'number') ? error.status : 500
+      };
+      throw apiError;
     }
-
-    // Only try to parse as JSON if we haven't already
-    const data = typeof errorDetail === 'string' ? JSON.parse(responseData) : errorDetail;
-    console.log("Analysis started successfully:", data);
-    return data;
-  } catch (error) {
-    console.error("Analysis request failed:", error);
-    throw error;
   }
-}
 
-export async function checkAnalysisStatus(taskId: string) {
-  console.log("Checking status for task:", taskId);
-  
-  try {
-    const response = await fetch(
-      `${API_CONFIG.baseUrl}${API_CONFIG.endpoints.status(taskId)}`
-    );
-
-    const responseData = await response.text();
-    let errorDetail;
-
+  async getAnalysisStatus(taskId: string) {
     try {
-      // Try to parse as JSON
-      const jsonData = JSON.parse(responseData);
-      errorDetail = jsonData.detail || responseData;
-    } catch {
-      // If not JSON, use raw response
-      errorDetail = responseData;
-    }
+      const response = await fetch(`${this.baseUrl}/analyze/${taskId}`);
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
 
-    if (!response.ok) {
-      console.error("Status check error:", {
-        status: response.status,
-        statusText: response.statusText,
-        error: errorDetail
-      });
-      throw new Error(`Status check failed (${response.status}): ${errorDetail}`);
+      return await response.json();
+    } catch (error) {
+      console.error('Status check failed:', error);
+      throw error;
     }
+  }
 
-    // Only try to parse as JSON if we haven't already
-    const data = typeof errorDetail === 'string' ? JSON.parse(responseData) : errorDetail;
-    console.log("Status check result:", data);
-    return data;
-  } catch (error) {
-    console.error("Status check failed:", error);
-    throw error;
+  async checkHealth() {
+    try {
+      const response = await fetch(`${this.baseUrl}/health`);
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      return await response.json();
+    } catch (error) {
+      console.error('Health check failed:', error);
+      throw error;
+    }
   }
 }
 
-export async function listFiles(skip = 0, limit = 10) {
-  console.log("Fetching files:", { skip, limit });
-  
-  try {
-    const response = await fetch(
-      `${API_CONFIG.baseUrl}${API_CONFIG.endpoints.files.list}?skip=${skip}&limit=${limit}`
-    );
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error("Files fetch error:", {
-        status: response.status,
-        statusText: response.statusText,
-        error: errorText
-      });
-      throw new Error(`Files fetch failed: ${response.status} ${response.statusText}`);
-    }
-
-    const data = await response.json();
-    console.log("Files fetched successfully:", data);
-    return data;
-  } catch (error) {
-    console.error("Files fetch failed:", error);
-    throw error;
-  }
-}
-
-export async function getFileInfo(fileId: string) {
-  console.log("Fetching file info:", fileId);
-  
-  try {
-    const response = await fetch(
-      `${API_CONFIG.baseUrl}${API_CONFIG.endpoints.files.info(fileId)}`
-    );
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error("File info fetch error:", {
-        status: response.status,
-        statusText: response.statusText,
-        error: errorText
-      });
-      throw new Error(`File info fetch failed: ${response.status} ${response.statusText}`);
-    }
-
-    const data = await response.json();
-    console.log("File info fetched successfully:", data);
-    return data;
-  } catch (error) {
-    console.error("File info fetch failed:", error);
-    throw error;
-  }
-}
-
-export async function deleteFile(fileId: string) {
-  console.log("Deleting file:", fileId);
-  
-  try {
-    const response = await fetch(
-      `${API_CONFIG.baseUrl}${API_CONFIG.endpoints.files.delete(fileId)}`,
-      { method: "DELETE" }
-    );
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error("File deletion error:", {
-        status: response.status,
-        statusText: response.statusText,
-        error: errorText
-      });
-      throw new Error(`File deletion failed: ${response.status} ${response.statusText}`);
-    }
-
-    const data = await response.json();
-    console.log("File deleted successfully:", data);
-    return data;
-  } catch (error) {
-    console.error("File deletion failed:", error);
-    throw error;
-  }
-}
-
-export async function cleanupOldData(days: number = 30) {
-  console.log("Running cleanup for data older than", days, "days");
-  
-  try {
-    const response = await fetch(
-      `${API_CONFIG.baseUrl}${API_CONFIG.endpoints.admin.cleanup}?days=${days}`,
-      { method: "POST" }
-    );
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error("Cleanup error:", {
-        status: response.status,
-        statusText: response.statusText,
-        error: errorText
-      });
-      throw new Error(`Cleanup failed: ${response.status} ${response.statusText}`);
-    }
-
-    const data = await response.json();
-    console.log("Cleanup completed successfully:", data);
-    return data;
-  } catch (error) {
-    console.error("Cleanup failed:", error);
-    throw error;
-  }
-}
-
-export async function checkHealth() {
-  console.log("Checking API health");
-  
-  try {
-    const response = await fetch(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.health}`);
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error("Health check error:", {
-        status: response.status,
-        statusText: response.statusText,
-        error: errorText
-      });
-      throw new Error(`Health check failed: ${response.status} ${response.statusText}`);
-    }
-
-    const data = await response.json();
-    console.log("Health check result:", data);
-    return data;
-  } catch (error) {
-    console.error("Health check failed:", error);
-    throw error;
-  }
-}
+export const api = new APIClient();

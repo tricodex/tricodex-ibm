@@ -21,33 +21,68 @@ class BaseAgent(ABC):
         self.start_time = None
         self.current_state = "init"
         self.analysis_results = {}
+        self._error_count = 0
+        self._last_error = None
     
     async def analyze(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Main analysis entry point with timeout handling"""
         try:
             self.start_time = datetime.now()
+            self._validate_input_data(data)
             sanitized_data = self._sanitize_data(data)
-            return await self._run_analysis(sanitized_data)
+            
+            # Execute analysis with progress tracking
+            result = await self._run_analysis(sanitized_data)
+            
+            # Validate output structure
+            self._validate_output_structure(result)
+            return result
+            
         except Exception as e:
             logger.error(f"Analysis failed: {e}")
+            self._error_count += 1
+            self._last_error = str(e)
             return {
                 "status": "error",
                 "error": str(e),
-                "partial_results": self.analysis_results
+                "error_count": self._error_count,
+                "partial_results": self.analysis_results,
+                "timestamp": datetime.now().isoformat()
             }
         finally:
             self._reset_state()
     
-    def _sanitize_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Recursively sanitize data to handle timestamps and other special types"""
+    def _validate_input_data(self, data: Dict[str, Any]) -> None:
+        """Validate input data structure"""
+        if not isinstance(data, dict):
+            raise ValueError(f"Expected dict input, got {type(data)}")
+            
+        required_fields = {"metadata", "metrics"}
+        missing = required_fields - set(data.keys())
+        if missing:
+            raise ValueError(f"Missing required fields: {missing}")
+    
+    def _validate_output_structure(self, output: Dict[str, Any]) -> None:
+        """Validate output structure"""
+        required_fields = {"status", "insights", "patterns", "metrics"}
+        if not all(field in output for field in required_fields):
+            logger.error(f"Invalid output structure: {output.keys()}")
+            raise ValueError("Output missing required fields")
+    
+    def _sanitize_data(self, data: Any) -> Any:
+        """Recursively sanitize data"""
         if isinstance(data, dict):
-            return {k: self._sanitize_data(v) for k, v in data.items()}
+            return {str(k): self._sanitize_data(v) for k, v in data.items()}
         elif isinstance(data, list):
             return [self._sanitize_data(item) for item in data]
         elif isinstance(data, (pd.Timestamp, datetime)):
             return data.isoformat()
-        elif pd.isna(data):  # Handle NaN/None values
+        elif pd.isna(data) or (isinstance(data, float) and pd.isna(data)):
             return None
+        elif hasattr(data, 'to_dict'):
+            return self._sanitize_data(data.to_dict())
+        elif hasattr(data, 'item'):
+            return data.item()
         return data
     
     @abstractmethod
@@ -66,14 +101,38 @@ class BaseAgent(ABC):
     
     def _structure_output(self, output: Dict[str, Any]) -> Dict[str, Any]:
         """Ensure consistent output structure"""
-        sanitized_output = self._sanitize_data(output)
-        return {
-            "insights": sanitized_output.get("insights", []),
-            "patterns": sanitized_output.get("patterns", []),
-            "recommendations": sanitized_output.get("recommendations", []),
-            "metrics": sanitized_output.get("metrics", {}),
-            "data_quality": sanitized_output.get("data_quality", {})
-        }
+        try:
+            sanitized_output = self._sanitize_data(output)
+            structured = {
+                "status": "success",
+                "insights": sanitized_output.get("insights", []),
+                "patterns": sanitized_output.get("patterns", []),
+                "recommendations": sanitized_output.get("recommendations", []),
+                "metrics": sanitized_output.get("metrics", {}),
+                "data_quality": sanitized_output.get("data_quality", {}),
+                "synthesis": sanitized_output.get("synthesis", {}),
+                "timestamp": datetime.now().isoformat(),
+                "processing_time": self._get_processing_time()
+            }
+            
+            # Add error information if any occurred
+            if self._error_count > 0:
+                structured["warnings"] = {
+                    "error_count": self._error_count,
+                    "last_error": self._last_error
+                }
+                
+            return structured
+            
+        except Exception as e:
+            logger.error(f"Failed to structure output: {e}")
+            raise
+    
+    def _get_processing_time(self) -> float:
+        """Calculate total processing time"""
+        if not self.start_time:
+            return 0.0
+        return (datetime.now() - self.start_time).total_seconds()
     
     @staticmethod
     def _validate_json(text: str) -> Dict[str, Any]:

@@ -1,410 +1,280 @@
 """
 Function calling capabilities for LLM agents with enhanced process metrics
 """
+import asyncio
 from typing import Dict, Any, List, Optional, Tuple
+from datetime import datetime, timedelta
 import logging
 import json
-import re
-from datetime import datetime, timedelta
-import pandas as pd
-from transformers import AutoTokenizer
-from langchain_ibm import WatsonxLLM
+import time
+from .watson_agent import WatsonAgent
+from .gemini_agent import GeminiAgent
 from .base_agent import BaseAgent
 
 logger = logging.getLogger(__name__)
 
-class FunctionCallSchema:
-    """Schema definitions for function calling"""
-    KPI_ANALYSIS = {
-        "name": "analyze_kpis",
-        "description": "Analyze key performance indicators",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "metrics": {"type": "array", "items": {"type": "object"}},
-                "time_period": {"type": "string"},
-                "target_goals": {"type": "object"}
-            },
-            "required": ["metrics"]
-        }
-    }
-    
-    PROCESS_EFFICIENCY = {
-        "name": "process_efficiency",
-        "description": "Analyze process efficiency",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "process_data": {"type": "object"},
-                "time_metrics": {"type": "object"}
-            },
-            "required": ["process_data"]
-        }
-    }
-
 class FunctionCallingAgent(BaseAgent):
-    """Agent that handles function calling capabilities"""
+    """Agent with function calling capabilities combining Watson and Gemini"""
     
-    def __init__(self, model_params: Dict[str, Any], timeout: int = 300):
+    def __init__(self, watson_agent: WatsonAgent, gemini_agent: GeminiAgent, timeout: int = 300):
         super().__init__(timeout)
-        self.tokenizer = AutoTokenizer.from_pretrained("ibm-granite/granite-3.1-8b-instruct")
-        self.model = WatsonxLLM(**model_params)
-        self.available_functions = [
-            FunctionCallSchema.KPI_ANALYSIS,
-            FunctionCallSchema.PROCESS_EFFICIENCY
-        ]
-
+        self.watson = watson_agent
+        self.gemini = gemini_agent
+        self._api_calls = 0
+        self._last_call_time = 0
+        
     async def _run_analysis(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute function calling analysis"""
+        """Execute combined analysis using both Watson and Gemini"""
         try:
-            # Prepare system context
-            conversation = [
-                {"role": "system", "content": "You are a business process analysis assistant."},
-                {"role": "user", "content": self._create_analysis_prompt(data)}
-            ]
-
-            # Generate instruction with functions
-            instruction = self.tokenizer.apply_chat_template(
-                conversation=conversation,
-                tools=self.available_functions,
-                tokenize=False,
-                add_generation_prompt=True
+            logger.info("Starting combined analysis")
+            start_time = time.time()
+            
+            # Run analysis in parallel
+            watson_future = self.watson._run_analysis(data)
+            gemini_future = self.gemini._run_analysis(data)
+            
+            # Gather results
+            watson_result, gemini_result = await asyncio.gather(
+                watson_future, 
+                gemini_future,
+                return_exceptions=True
             )
-
-            # Execute function calling
-            response = await self.model.agenerate(instruction)
-            result = self._parse_function_response(response)
             
-            # Execute the called function
-            if result.get("name") == "analyze_kpis":
-                return await self._analyze_kpis(result.get("arguments", {}), data)
-            elif result.get("name") == "process_efficiency":
-                return await self._analyze_process_efficiency(result.get("arguments", {}), data)
+            # Handle potential errors
+            if isinstance(watson_result, Exception):
+                logger.error(f"Watson analysis failed: {watson_result}")
+                watson_result = {}
+            if isinstance(gemini_result, Exception):
+                logger.error(f"Gemini analysis failed: {gemini_result}")
+                gemini_result = {}
+                
+            # Merge and enhance results
+            combined_results = await self._merge_results(watson_result, gemini_result)
+            
+            # Add meta-analysis
+            if combined_results:
+                meta_insights = await self._generate_meta_insights(combined_results)
+                combined_results["meta_analysis"] = meta_insights
+            
+            execution_time = time.time() - start_time
+            logger.info(f"Combined analysis completed in {execution_time:.2f}s")
+            
+            return combined_results
+            
+        except Exception as e:
+            logger.error(f"Combined analysis failed: {e}")
+            raise
+            
+    async def _merge_results(self, watson_results: Dict[str, Any], gemini_results: Dict[str, Any]) -> Dict[str, Any]:
+        """Merge and reconcile results from both models"""
+        try:
+            merged = {
+                "insights": [],
+                "patterns": [],
+                "metrics": {},
+                "recommendations": [],
+                "data_quality": {},
+                "synthesis": {}
+            }
+            
+            # Merge insights with source attribution
+            merged["insights"].extend([{"source": "watson", "insight": i} for i in watson_results.get("insights", [])])
+            merged["insights"].extend([{"source": "gemini", "insight": i} for i in gemini_results.get("insights", [])])
+            
+            # Merge patterns with deduplication
+            all_patterns = []
+            seen_patterns = set()
+            
+            for pattern in watson_results.get("patterns", []) + gemini_results.get("patterns", []):
+                pattern_key = f"{pattern.get('name', '')}_{pattern.get('type', '')}"
+                if pattern_key not in seen_patterns:
+                    seen_patterns.add(pattern_key)
+                    all_patterns.append(pattern)
+            
+            merged["patterns"] = all_patterns
+            
+            # Merge metrics with averaging for duplicates
+            all_metrics = {}
+            for source, results in [("watson", watson_results), ("gemini", gemini_results)]:
+                for key, metric in results.get("metrics", {}).items():
+                    if key not in all_metrics:
+                        all_metrics[key] = {"values": [], "units": set()}
+                    all_metrics[key]["values"].append(metric.get("value", 0))
+                    all_metrics[key]["units"].add(metric.get("unit", ""))
+                    
+            # Average metrics and resolve unit conflicts
+            for key, data in all_metrics.items():
+                avg_value = sum(data["values"]) / len(data["values"])
+                units = list(data["units"])
+                merged["metrics"][key] = {
+                    "value": avg_value,
+                    "unit": units[0] if len(units) == 1 else "mixed",
+                    "confidence": 1.0 if len(units) == 1 else 0.5
+                }
+            
+            # Combine recommendations with source tracking
+            for source, results in [("watson", watson_results), ("gemini", gemini_results)]:
+                for rec in results.get("recommendations", []):
+                    rec["source"] = source
+                    merged["recommendations"].append(rec)
+            
+            # Merge data quality assessments
+            merged["data_quality"] = {
+                "watson": watson_results.get("data_quality", {}),
+                "gemini": gemini_results.get("data_quality", {}),
+            }
+            
+            # Add synthesis section
+            merged["synthesis"] = {
+                "agreement_level": self._calculate_agreement(watson_results, gemini_results),
+                "complementary_insights": self._find_complementary_insights(
+                    watson_results.get("insights", []),
+                    gemini_results.get("insights", [])
+                )
+            }
+            
+            return merged
+            
+        except Exception as e:
+            logger.error(f"Failed to merge results: {e}")
+            raise
+            
+    def _calculate_agreement(self, watson_results: Dict[str, Any], gemini_results: Dict[str, Any]) -> float:
+        """Calculate agreement level between Watson and Gemini results"""
+        try:
+            # Compare patterns
+            watson_patterns = {p.get("name") for p in watson_results.get("patterns", [])}
+            gemini_patterns = {p.get("name") for p in gemini_results.get("patterns", [])}
+            
+            if watson_patterns or gemini_patterns:
+                pattern_agreement = len(watson_patterns & gemini_patterns) / len(watson_patterns | gemini_patterns)
             else:
-                raise ValueError(f"Unknown function: {result.get('name')}")
-
-        except Exception as e:
-            logger.error(f"Function calling failed: {e}")
-            raise
-
-    def _calculate_throughput(self, process_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Calculate process throughput metrics"""
-        try:
-            total_tickets = process_data.get("total_records", 0)
-            time_metrics = process_data.get("time_metrics", {})
-            resolution_times = time_metrics.get("resolution_times", [])
-            
-            if not resolution_times:
-                return {
-                    "daily_throughput": 0,
-                    "weekly_throughput": 0,
-                    "average_processing_time": 0
-                }
-            
-            # Calculate time-based metrics
-            time_range = max(resolution_times) - min(resolution_times)
-            days_span = time_range.days or 1  # Avoid division by zero
-            
-            throughput_metrics = {
-                "daily_throughput": total_tickets / days_span,
-                "weekly_throughput": (total_tickets / days_span) * 7,
-                "average_processing_time": sum(
-                    (t.total_seconds() for t in resolution_times if t),
-                    start=0
-                ) / len(resolution_times) if resolution_times else 0
-            }
-            
-            return {
-                **throughput_metrics,
-                "confidence": self._calculate_confidence(throughput_metrics)
-            }
-            
-        except Exception as e:
-            logger.error(f"Throughput calculation failed: {e}")
-            return {"error": str(e)}
-
-    def _identify_bottlenecks(self, process_data: Dict[str, Any], 
-                            time_metrics: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Identify process bottlenecks"""
-        try:
-            bottlenecks = []
-            
-            # Analyze response times
-            response_times = time_metrics.get("first_response_times", [])
-            if response_times:
-                avg_response = sum(t.total_seconds() for t in response_times) / len(response_times)
-                if avg_response > 3600:  # More than 1 hour
-                    bottlenecks.append({
-                        "type": "response_time",
-                        "severity": "high" if avg_response > 7200 else "medium",
-                        "metric": avg_response,
-                        "impact": "Long first response times affecting customer satisfaction"
-                    })
-            
-            # Analyze resolution times
-            resolution_times = time_metrics.get("resolution_times", [])
-            if resolution_times:
-                avg_resolution = sum(t.total_seconds() for t in resolution_times) / len(resolution_times)
-                if avg_resolution > 86400:  # More than 24 hours
-                    bottlenecks.append({
-                        "type": "resolution_time",
-                        "severity": "high" if avg_resolution > 172800 else "medium",
-                        "metric": avg_resolution,
-                        "impact": "Extended resolution times indicating process delays"
-                    })
-            
-            # Analyze workload distribution
-            agent_loads = process_data.get("agent_workload", {})
-            if agent_loads:
-                avg_load = sum(agent_loads.values()) / len(agent_loads)
-                overloaded_agents = [
-                    agent for agent, load in agent_loads.items()
-                    if load > avg_load * 1.5
-                ]
-                if overloaded_agents:
-                    bottlenecks.append({
-                        "type": "workload_imbalance",
-                        "severity": "medium",
-                        "affected_agents": overloaded_agents,
-                        "impact": "Uneven workload distribution causing delays"
-                    })
-            
-            return bottlenecks
-            
-        except Exception as e:
-            logger.error(f"Bottleneck identification failed: {e}")
-            return [{"error": str(e)}]
-
-    def _calculate_resource_utilization(self, process_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Calculate resource utilization metrics"""
-        try:
-            # Extract resource data
-            agent_metrics = process_data.get("agent_metrics", {})
-            time_metrics = process_data.get("time_metrics", {})
-            
-            # Calculate utilization rates
-            total_time = sum(time_metrics.get("handling_times", [0]))
-            available_time = sum(time_metrics.get("available_times", [0]))
-            
-            utilization = {
-                "overall_utilization": (total_time / available_time) if available_time else 0,
-                "agent_utilization": {},
-                "peak_hours": self._identify_peak_hours(process_data),
-                "resource_efficiency": self._calculate_efficiency_metrics(agent_metrics)
-            }
-            
-            # Add agent-specific metrics
-            for agent, metrics in agent_metrics.items():
-                agent_total = metrics.get("total_time", 0)
-                agent_available = metrics.get("available_time", 0)
-                utilization["agent_utilization"][agent] = {
-                    "rate": (agent_total / agent_available) if agent_available else 0,
-                    "ticket_count": metrics.get("ticket_count", 0),
-                    "average_handling_time": metrics.get("avg_handling_time", 0)
-                }
-            
-            return utilization
-            
-        except Exception as e:
-            logger.error(f"Resource utilization calculation failed: {e}")
-            return {"error": str(e)}
-
-    def _identify_peak_hours(self, process_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Identify peak activity hours"""
-        try:
-            hourly_counts = process_data.get("hourly_distribution", {})
-            if not hourly_counts:
-                return {}
-            
-            avg_count = sum(hourly_counts.values()) / len(hourly_counts)
-            peak_hours = {
-                hour: count
-                for hour, count in hourly_counts.items()
-                if count > avg_count * 1.2  # 20% above average
-            }
-            
-            return {
-                "peak_hours": peak_hours,
-                "average_load": avg_count,
-                "peak_load_factor": max(peak_hours.values()) / avg_count if peak_hours else 1
-            }
-            
-        except Exception as e:
-            logger.error(f"Peak hours identification failed: {e}")
-            return {"error": str(e)}
-
-    def _calculate_efficiency_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
-        """Calculate efficiency-related metrics"""
-        try:
-            all_handling_times = []
-            all_resolution_rates = []
-            
-            for metrics in agent_metrics.values():
-                if "handling_times" in metrics:
-                    all_handling_times.extend(metrics["handling_times"])
-                if "resolution_rate" in metrics:
-                    all_resolution_rates.append(metrics["resolution_rate"])
-            
-            return {
-                "average_handling_time": sum(all_handling_times) / len(all_handling_times) if all_handling_times else 0,
-                "handling_time_variance": self._calculate_variance(all_handling_times),
-                "resolution_rate": sum(all_resolution_rates) / len(all_resolution_rates) if all_resolution_rates else 0
-            }
-            
-        except Exception as e:
-            logger.error(f"Efficiency metrics calculation failed: {e}")
-            return {"error": str(e)}
-
-    @staticmethod
-    def _calculate_variance(values: List[float]) -> float:
-        """Calculate variance of a list of values"""
-        if not values:
-            return 0
-        mean = sum(values) / len(values)
-        squared_diff = sum((x - mean) ** 2 for x in values)
-        return squared_diff / len(values)
-
-    @staticmethod
-    def _calculate_confidence(metrics: Dict[str, float]) -> float:
-        """Calculate confidence score for metrics"""
-        if not metrics:
-            return 0
-        
-        # Check for invalid values
-        if any(not isinstance(v, (int, float)) or v < 0 for v in metrics.values()):
-            return 0
-        
-        # Basic confidence calculation
-        return min(1.0, sum(1 for v in metrics.values() if v > 0) / len(metrics))
-
-    def _analyze_time_period(self, metrics: Dict[str, Any], 
-                           time_period: Optional[str]) -> Dict[str, Any]:
-        """Analyze metrics over specified time period"""
-        try:
-            if not time_period:
-                return {}
+                pattern_agreement = 0
                 
-            # Extract time-based metrics
-            time_metrics = {
-                k: v for k, v in metrics.items()
-                if isinstance(v, (datetime, pd.Timestamp))
-            }
+            # Compare metrics
+            watson_metrics = set(watson_results.get("metrics", {}).keys())
+            gemini_metrics = set(gemini_results.get("metrics", {}).keys())
             
-            if not time_metrics:
-                return {}
-            
-            # Calculate period statistics
-            start_time = min(time_metrics.values())
-            end_time = max(time_metrics.values())
-            duration = end_time - start_time
-            
-            return {
-                "period_start": start_time.isoformat(),
-                "period_end": end_time.isoformat(),
-                "duration_days": duration.days,
-                "metrics_count": len(time_metrics),
-                "daily_average": len(time_metrics) / (duration.days or 1)
-            }
+            if watson_metrics or gemini_metrics:
+                metric_agreement = len(watson_metrics & gemini_metrics) / len(watson_metrics | gemini_metrics)
+            else:
+                metric_agreement = 0
+                
+            # Calculate weighted agreement
+            return (pattern_agreement * 0.6) + (metric_agreement * 0.4)
             
         except Exception as e:
-            logger.error(f"Time period analysis failed: {e}")
-            return {"error": str(e)}
-
-    def _create_analysis_prompt(self, data: Dict[str, Any]) -> str:
-        """Create structured analysis prompt"""
-        # Extract key metrics for the prompt
-        metrics = data.get("metrics", {})
-        patterns = data.get("patterns", [])
-        metadata = data.get("metadata", {})
+            logger.warning(f"Failed to calculate agreement: {e}")
+            return 0.0
+            
+    def _find_complementary_insights(self, watson_insights: List[str], gemini_insights: List[str]) -> List[Dict[str, Any]]:
+        """Identify complementary insights between models"""
+        complementary = []
         
-        return f"""Analyze this process data and provide insights:
+        # Find unique themes in each set
+        watson_themes = set(self._extract_themes(watson_insights))
+        gemini_themes = set(self._extract_themes(gemini_insights))
         
-        Process Metrics:
-        {json.dumps(metrics, indent=2)}
+        # Identify unique contributions
+        watson_unique = watson_themes - gemini_themes
+        gemini_unique = gemini_themes - watson_themes
         
-        Patterns:
-        {json.dumps(patterns, indent=2)}
+        if watson_unique:
+            complementary.append({
+                "source": "watson",
+                "unique_themes": list(watson_unique)
+            })
+            
+        if gemini_unique:
+            complementary.append({
+                "source": "gemini",
+                "unique_themes": list(gemini_unique)
+            })
+            
+        return complementary
         
-        Metadata:
-        {json.dumps(metadata, indent=2)}
+    def _extract_themes(self, insights: List[str]) -> List[str]:
+        """Extract key themes from insights"""
+        themes = set()
         
-        Analyze the following aspects:
-        1. Key performance indicators and their trends
-        2. Process efficiency and bottlenecks
-        3. Resource utilization patterns
-        4. Recommendations for improvement
+        # Simple keyword extraction (can be enhanced with NLP)
+        keywords = ["performance", "efficiency", "bottleneck", "improvement",
+                   "quality", "cost", "time", "resource", "risk"]
+                   
+        for insight in insights:
+            for keyword in keywords:
+                if keyword in insight.lower():
+                    themes.add(keyword)
+                    
+        return list(themes)
         
-        Focus on actionable insights and quantitative analysis.
-        Return results using the appropriate function call.
-        """
-
-    def _parse_function_response(self, response: str) -> Dict[str, Any]:
-        """Parse and validate function calling response"""
+    async def _generate_meta_insights(self, combined_results: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate meta-analysis of the combined results"""
         try:
-            # Extract JSON from response
-            json_match = re.search(r'\{.*\}', response, re.DOTALL)
-            if not json_match:
-                raise ValueError("No valid JSON found in response")
-                
-            result = json.loads(json_match.group())
+            meta_insights = {
+                "model_agreement": combined_results["synthesis"]["agreement_level"],
+                "confidence_levels": {
+                    "high": [],
+                    "medium": [],
+                    "low": []
+                },
+                "cross_validation": []
+            }
             
-            # Validate function name
-            if "name" not in result or result["name"] not in {f["name"] for f in self.available_functions}:
-                raise ValueError("Invalid function name in response")
-                
-            # Ensure arguments are present
-            if "arguments" not in result:
-                result["arguments"] = {}
-                
-            return result
-
+            # Analyze confidence levels
+            for pattern in combined_results["patterns"]:
+                confidence = self._assess_pattern_confidence(pattern)
+                if confidence >= 0.8:
+                    meta_insights["confidence_levels"]["high"].append(pattern["name"])
+                elif confidence >= 0.5:
+                    meta_insights["confidence_levels"]["medium"].append(pattern["name"])
+                else:
+                    meta_insights["confidence_levels"]["low"].append(pattern["name"])
+            
+            # Cross-validate findings
+            meta_insights["cross_validation"] = await self._cross_validate_findings(combined_results)
+            
+            return meta_insights
+            
         except Exception as e:
-            logger.error(f"Failed to parse function response: {e}")
-            raise
-
-    def _stringify_keys(self, obj: Any) -> Any:
-        """Recursively convert all dictionary keys to strings"""
-        if isinstance(obj, dict):
-            return {str(key): self._stringify_keys(value) for key, value in obj.items()}
-        elif isinstance(obj, list):
-            return [self._stringify_keys(item) for item in obj]
-        elif isinstance(obj, tuple):
-            return tuple(self._stringify_keys(item) for item in obj)
-        return obj
-
-    def _sanitize_numeric_values(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Ensure all numeric values are properly formatted for JSON"""
-        def _sanitize(value: Any) -> Any:
-            if isinstance(value, (float, int)):
-                return float(value) if isinstance(value, float) else value
-            elif isinstance(value, dict):
-                return {k: _sanitize(v) for k, v in value.items()}
-            elif isinstance(value, (list, tuple)):
-                return [_sanitize(item) for item in value]
-            return value
+            logger.error(f"Failed to generate meta-insights: {e}")
+            return {}
             
-        return _sanitize(data)
-
-    def _validate_timestamps(self, timestamps: List[Any]) -> List[datetime]:
-        """Validate and convert timestamp values"""
-        valid_timestamps = []
-        for ts in timestamps:
-            try:
-                if isinstance(ts, str):
-                    valid_timestamps.append(datetime.fromisoformat(ts))
-                elif isinstance(ts, (datetime, pd.Timestamp)):
-                    valid_timestamps.append(ts)
-            except (ValueError, TypeError) as e:
-                logger.warning(f"Invalid timestamp value: {ts}, Error: {e}")
-                continue
-        return valid_timestamps
-
-    async def _handle_response_error(self, error: Exception) -> Dict[str, Any]:
-        """Handle errors in function responses"""
-        logger.error(f"Function response error: {error}")
-        return {
-            "status": "error",
-            "error": str(error),
-            "timestamp": datetime.utcnow().isoformat(),
-            "partial_results": getattr(error, "partial_results", None)
-        }
+    def _assess_pattern_confidence(self, pattern: Dict[str, Any]) -> float:
+        """Assess confidence in a detected pattern"""
+        confidence = 0.5  # Base confidence
+        
+        # Adjust based on frequency
+        if "frequency" in pattern:
+            confidence += min(0.3, pattern["frequency"] / 100)
+            
+        # Adjust based on performance metrics
+        if "performance_metrics" in pattern:
+            confidence += 0.2
+            
+        return min(1.0, confidence)
+        
+    async def _cross_validate_findings(self, results: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Cross-validate findings between models"""
+        validations = []
+        
+        # Group insights by theme
+        insights_by_theme = {}
+        for insight in results["insights"]:
+            themes = self._extract_themes([insight["insight"]])
+            for theme in themes:
+                if theme not in insights_by_theme:
+                    insights_by_theme[theme] = {"watson": [], "gemini": []}
+                insights_by_theme[theme][insight["source"]].append(insight["insight"])
+        
+        # Analyze agreement for each theme
+        for theme, sources in insights_by_theme.items():
+            if sources["watson"] and sources["gemini"]:
+                validations.append({
+                    "theme": theme,
+                    "agreement": "high" if len(sources["watson"]) + len(sources["gemini"]) > 2 else "medium",
+                    "watson_count": len(sources["watson"]),
+                    "gemini_count": len(sources["gemini"])
+                })
+        
+        return validations
